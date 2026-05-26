@@ -13,6 +13,24 @@ fusion:
   core_method: 'LateFusionDataset' # LateFusionDataset, EarlyFusionDataset, IntermediateFusionDataset supported
   args: []
 
+trust_fusion:
+  use_trust_fusion: false
+  mode: trust_nms
+  iou_thr: 0.5
+  update_rate: 0.1
+  default_reputation: 0.5
+  min_reputation: 0.0
+  drop_below: 0.3
+  score_power: 1.0
+  ego_reputation: 1.0
+  reputation_map: ""
+  id_map: ""
+  log_reputation: false
+  log_dir: ""
+
+physical_consistency:
+  use_physical_consistency: false
+
 # preprocess-related
 preprocess:
   # options: BasePreprocessor, VoxelPreprocessor, BevPreprocessor
@@ -94,4 +112,3 @@ lr_scheduler:
   core_method: multistep #step, multistep and Exponential support
   gamma: 0.1
   step_size: [10, 15]
-

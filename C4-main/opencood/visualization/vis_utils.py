@@ -367,7 +367,9 @@ def visualize_single_sample_output_gt(pred_tensor,
                                       point_size=1.0,
                                       background_color='black',
                                       show_pred=True,
-                                      show_gt=True):
+                                      show_gt=True,
+                                      pc_range=None,
+                                      headless=False):
     """
     Visualize the prediction, groundtruth with point cloud together.
 
@@ -422,12 +424,31 @@ def visualize_single_sample_output_gt(pred_tensor,
                                point_size=point_size,
                                background_color=background_color)
     if save_path:
-        save_o3d_visualization(visualize_elements,
-                               save_path,
-                               width=width,
-                               height=height,
-                               point_size=point_size,
-                               background_color=background_color)
+        try:
+            if headless:
+                raise AttributeError('background_color headless fallback')
+
+            save_o3d_visualization(visualize_elements,
+                                   save_path,
+                                   width=width,
+                                   height=height,
+                                   point_size=point_size,
+                                   background_color=background_color)
+        except AttributeError as exc:
+            if not headless and "background_color" not in str(exc):
+                raise
+            save_inference_sample_plt(pred_tensor,
+                                      gt_tensor,
+                                      pcd,
+                                      save_path,
+                                      pc_range=pc_range,
+                                      mode=mode,
+                                      width=width,
+                                      height=height,
+                                      point_size=point_size,
+                                      background_color=background_color,
+                                      show_pred=show_pred,
+                                      show_gt=show_gt)
 
 
 def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
@@ -783,6 +804,83 @@ def save_sequence_sample_plt(batch_data,
                           ax=ax,
                           point_size=point_size,
                           background_color=background_color)
+
+
+def draw_corner_boxes_plt(boxes_corner,
+                          ax,
+                          color=None,
+                          linewidth_scale=1.0):
+    if boxes_corner is None:
+        return ax
+
+    boxes_np = boxes_corner
+    if not isinstance(boxes_np, np.ndarray):
+        boxes_np = common_utils.torch_tensor_to_numpy(boxes_np)
+    if len(boxes_np.shape) == 2:
+        boxes_np = boxes_np[np.newaxis, ...]
+
+    for box in boxes_np:
+        bev = box[:4, :2]
+        ax.plot(bev[[0, 1, 2, 3, 0], 0],
+                bev[[0, 1, 2, 3, 0], 1],
+                color=color,
+                linewidth=0.8 * linewidth_scale)
+        ax.plot(bev[[2, 3], 0],
+                bev[[2, 3], 1],
+                color=color,
+                linewidth=2.0 * linewidth_scale)
+    return ax
+
+
+def save_inference_sample_plt(pred_tensor,
+                              gt_tensor,
+                              pcd,
+                              save_path,
+                              pc_range=None,
+                              mode='constant',
+                              width=1920,
+                              height=1080,
+                              dpi=100,
+                              point_size=1.0,
+                              background_color='dark',
+                              show_pred=True,
+                              show_gt=True):
+    if len(pcd.shape) == 3:
+        pcd = pcd[0]
+
+    origin_lidar = pcd
+    if not isinstance(origin_lidar, np.ndarray):
+        origin_lidar = common_utils.torch_tensor_to_numpy(origin_lidar)
+    if origin_lidar.shape[1] > 4:
+        origin_lidar = origin_lidar[:, 1:]
+    origin_lidar = origin_lidar.copy()
+
+    point_colors = color_encoding(origin_lidar[:, -1]
+                                  if mode == 'intensity'
+                                  else origin_lidar[:, 2],
+                                  mode=mode)
+
+    if pc_range is None:
+        pc_range = [-140.8, -40, -3, 140.8, 40, 1]
+
+    fig = Figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(1, 1, 1)
+    draw_points_boxes_plt(pc_range,
+                          points=origin_lidar,
+                          point_colors=point_colors,
+                          ax=ax,
+                          point_size=point_size,
+                          background_color=background_color)
+
+    if show_gt and gt_tensor is not None:
+        draw_corner_boxes_plt(gt_tensor, ax, color='green')
+    if show_pred and pred_tensor is not None:
+        draw_corner_boxes_plt(pred_tensor, ax, color='red')
+
+    ensure_parent_dir(save_path)
+    ax.figure.savefig(save_path, facecolor=ax.figure.get_facecolor())
+    plt.close(ax.figure)
 
 
 def save_o3d_visualization(element,

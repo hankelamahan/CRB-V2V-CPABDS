@@ -42,6 +42,10 @@ def test_parser():
     parser.add_argument('--frame_index', type=int, default=None,
                         help='starting frame index for visualization export. '
                              'Negative values count from the end.')
+    parser.add_argument('--frame_indices', type=str, default='',
+                        help='comma-separated explicit frame indices for '
+                             'targeted export, e.g. "0,167,608". Negative '
+                             'values count from the end.')
     parser.add_argument('--num_frames', type=int, default=1,
                         help='number of consecutive frames to export. '
                              'Use 0 or a negative value to export until the '
@@ -58,6 +62,13 @@ def test_parser():
     parser.add_argument('--background', type=str, default='dark',
                         choices=sorted(vis_utils.BACKGROUND_PRESETS.keys()),
                         help='background preset for visualization output.')
+    parser.add_argument('--headless', action='store_true',
+                        help='use matplotlib fallback when saving images '
+                             'without a render window.')
+    parser.add_argument('--max_frames', type=int, default=0,
+                        help='limit the number of evaluated frames. '
+                             'Use 0 or a negative value to process the full '
+                             'validation set.')
     parser.add_argument('--pred_only', action='store_true',
                         help='only render prediction boxes.')
     parser.add_argument('--gt_only', action='store_true',
@@ -98,11 +109,30 @@ def main():
         targeted_save_dir = os.path.join(opt.model_dir, 'vis_selected')
     if targeted_save_dir:
         os.makedirs(targeted_save_dir, exist_ok=True)
-        selected_frame_indices = set(
-            vis_utils.resolve_frame_indices(len(opencood_dataset),
-                                            opt.frame_index,
-                                            opt.num_frames)
-        )
+        if opt.frame_indices:
+            selected_frame_indices = set()
+            for raw_index in opt.frame_indices.split(','):
+                raw_index = raw_index.strip()
+                if not raw_index:
+                    continue
+                resolved_indices = vis_utils.resolve_frame_indices(
+                    len(opencood_dataset),
+                    int(raw_index),
+                    1
+                )
+                selected_frame_indices.update(resolved_indices)
+        else:
+            selected_frame_indices = set(
+                vis_utils.resolve_frame_indices(len(opencood_dataset),
+                                                opt.frame_index,
+                                                opt.num_frames)
+            )
+
+    effective_max_frames = opt.max_frames
+    if selected_frame_indices:
+        max_selected_index = max(selected_frame_indices) + 1
+        if effective_max_frames <= 0 or effective_max_frames < max_selected_index:
+            effective_max_frames = max_selected_index
 
     print('Creating Model')
     model = train_utils.create_model(hypes)
@@ -140,6 +170,8 @@ def main():
             vis_aabbs_pred.append(o3d.geometry.LineSet())
 
     for i, batch_data in tqdm(enumerate(data_loader)):
+        if effective_max_frames > 0 and i >= effective_max_frames:
+            break
         # print(i)
         with torch.no_grad():
             batch_data = train_utils.to_device(batch_data, device)
@@ -221,7 +253,9 @@ def main():
                     point_size=opt.point_size,
                     background_color=opt.background,
                     show_pred=not opt.gt_only,
-                    show_gt=not opt.pred_only)
+                    show_gt=not opt.pred_only,
+                    pc_range=hypes['preprocess']['cav_lidar_range'],
+                    headless=opt.headless)
                 print('saved frame %d to %s' % (i, targeted_save_path))
 
             if opt.show_sequence:

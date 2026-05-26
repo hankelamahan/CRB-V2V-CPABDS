@@ -18,6 +18,7 @@ from opencood.data_utils.post_processor import build_postprocessor
 from opencood.data_utils.datasets import basedataset
 from opencood.data_utils.pre_processor import build_preprocessor
 from opencood.hypes_yaml.yaml_utils import load_yaml
+from opencood.trust.late_trust_fusion import LateTrustFusion, merge_and_nms
 from opencood.utils import box_utils
 from opencood.utils.pcd_utils import \
     mask_points_by_range, mask_ego_points, shuffle_points, \
@@ -35,15 +36,48 @@ class LateFusionDataset(basedataset.BaseDataset):
         self.pre_processor = build_preprocessor(params['preprocess'],
                                                 train)
         self.post_processor = build_postprocessor(params['postprocess'], train)
+        trust_params = params.get('trust_fusion', {})
+        self.trust_fusion = None
+        if trust_params.get('use_trust_fusion', False):
+            self.trust_fusion = LateTrustFusion(
+                trust_params,
+                params.get('physical_consistency', {})
+            )
 
     def __getitem__(self, idx):
+        sample_metadata = None
+        if not self.train:
+            sample_metadata = self._resolve_sample_metadata(idx)
+
         base_data_dict = self.retrieve_base_data(idx)
+        if sample_metadata is not None:
+            for cav_content in base_data_dict.values():
+                cav_content.update(sample_metadata)
+
         if self.train:
             reformat_data_dict = self.get_item_train(base_data_dict)
         else:
             reformat_data_dict = self.get_item_test(base_data_dict)
 
         return reformat_data_dict
+
+    def _resolve_sample_metadata(self, idx):
+        scenario_index = 0
+        for i, ele in enumerate(self.len_record):
+            if idx < ele:
+                scenario_index = i
+                break
+
+        scenario_database = self.scenario_database[scenario_index]
+        timestamp_index = idx if scenario_index == 0 else \
+            idx - self.len_record[scenario_index - 1]
+        timestamp_key = self.return_timestamp_key(scenario_database,
+                                                  timestamp_index)
+        return {
+            'scenario_index': scenario_index,
+            'timestamp_index': timestamp_index,
+            'timestamp_key': timestamp_key,
+        }
 
     def get_item_single_car(self, selected_cav_base):
         """
@@ -71,6 +105,7 @@ class LateFusionDataset(basedataset.BaseDataset):
         lidar_np = mask_ego_points(lidar_np)
 
         # generate the bounding box(n, 7) under the cav's space
+        # set the vehicles in the real world(GT BOXES) to the CAV's LIDAR coordinate system.
         object_bbx_center, object_bbx_mask, object_ids = \
             self.post_processor.generate_object_center([selected_cav_base],
                                                        selected_cav_base[
@@ -155,6 +190,16 @@ class LateFusionDataset(basedataset.BaseDataset):
                 self.get_item_single_car(selected_cav_base)
             selected_cav_processed.update({'transformation_matrix':
                                                transformation_matrix})
+            selected_cav_processed.update({
+                'cav_id': cav_id,
+                'original_cav_id': cav_id,
+                'is_ego': cav_id == ego_id,
+                'timestamp': selected_cav_base.get('timestamp_key', ''),
+                'timestamp_index': selected_cav_base.get('timestamp_index', -1),
+                'scenario_index': selected_cav_base.get('scenario_index', -1),
+                'lidar_pose': cav_lidar_pose,
+                'ego_lidar_pose': ego_lidar_pose,
+            })
             update_cav = "ego" if cav_id == ego_id else cav_id
             processed_data_dict.update({update_cav: selected_cav_processed})
 
@@ -232,6 +277,12 @@ class LateFusionDataset(basedataset.BaseDataset):
                                         'label_dict': label_torch_dict,
                                         'object_ids': object_ids,
                                         'transformation_matrix': transformation_matrix_torch})
+            for meta_key in ['cav_id', 'original_cav_id', 'is_ego',
+                             'timestamp', 'timestamp_index',
+                             'scenario_index', 'lidar_pose',
+                             'ego_lidar_pose']:
+                if meta_key in cav_content:
+                    output_dict[cav_id][meta_key] = cav_content[meta_key]
 
             if self.visualize:
                 origin_lidar = \
@@ -266,8 +317,87 @@ class LateFusionDataset(basedataset.BaseDataset):
         gt_box_tensor : torch.Tensor
             The tensor of gt bounding box.
         """
+        if self.trust_fusion is not None:
+            return self.post_process_trust(data_dict, output_dict)
+
         pred_box_tensor, pred_score = \
             self.post_processor.post_process(data_dict, output_dict)
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
 
         return pred_box_tensor, pred_score, gt_box_tensor
+
+    def post_process_trust(self, data_dict, output_dict):
+        if not hasattr(self.post_processor, 'delta_to_boxes3d'):
+            raise NotImplementedError(
+                'Trust-aware late fusion currently supports voxel-style '
+                'postprocessors with delta_to_boxes3d().')
+
+        cav_detections = []
+        for cav_id, cav_content in data_dict.items():
+            assert cav_id in output_dict
+            decoded = self._decode_single_cav_detection(
+                cav_id,
+                cav_content, #for gt and transformation
+                output_dict[cav_id]) #for predicting
+            if decoded is not None:
+                cav_detections.append(decoded)
+
+        trusted_detections, _ = self.trust_fusion.apply(cav_detections)
+        pred_box_tensor, pred_score = merge_and_nms(
+            trusted_detections,
+            self.post_processor.params['nms_thresh'])
+        gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
+
+        return pred_box_tensor, pred_score, gt_box_tensor
+
+    def _decode_single_cav_detection(self, cav_id, cav_content, cav_output):
+        transformation_matrix = cav_content['transformation_matrix']
+        anchor_box = cav_content['anchor_box']
+        post_params = self.post_processor.params
+
+        prob = cav_output['psm']
+        prob = torch.sigmoid(prob.permute(0, 2, 3, 1)).reshape(1, -1)
+        reg = cav_output['rm']
+        batch_box3d = self.post_processor.delta_to_boxes3d(reg, anchor_box)
+        mask = torch.gt(prob, post_params['target_args']['score_threshold'])
+        mask = mask.view(1, -1)
+        mask_reg = mask.unsqueeze(2).repeat(1, 1, 7)
+
+        assert batch_box3d.shape[0] == 1
+        boxes3d = torch.masked_select(batch_box3d[0],
+                                      mask_reg[0]).view(-1, 7)
+        scores = torch.masked_select(prob[0], mask[0])
+        if boxes3d.shape[0] == 0:
+            return None
+
+        boxes3d_corner = box_utils.boxes_to_corners_3d(
+            boxes3d,
+            order=post_params['order'])
+        projected_boxes3d = box_utils.project_box3d(boxes3d_corner,
+                                                    transformation_matrix)
+        projected_boxes2d = box_utils.corner_to_standup_box_torch(
+            projected_boxes3d)
+        labels = torch.ones(scores.shape[0],
+                            dtype=torch.long,
+                            device=scores.device)
+
+        original_cav_id = cav_content.get('original_cav_id', cav_id)
+        is_ego = cav_content.get('is_ego', cav_id == 'ego')
+        trust_id = self.trust_fusion.reputation_manager.external_id(
+            cav_id,
+            original_cav_id,
+            is_ego)
+
+        return {
+            'cav_id': cav_id,
+            'original_cav_id': original_cav_id,
+            'trust_id': trust_id,
+            'is_ego': is_ego,
+            'scenario_index': cav_content.get('scenario_index', -1),
+            'timestamp': cav_content.get('timestamp', ''),
+            'timestamp_index': cav_content.get('timestamp_index', -1),
+            'boxes3d': projected_boxes3d,
+            'boxes2d': projected_boxes2d,
+            'scores': scores,
+            'labels': labels,
+        }
