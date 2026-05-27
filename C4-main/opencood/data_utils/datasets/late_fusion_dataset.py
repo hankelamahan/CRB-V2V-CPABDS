@@ -41,7 +41,9 @@ class LateFusionDataset(basedataset.BaseDataset):
         if trust_params.get('use_trust_fusion', False):
             self.trust_fusion = LateTrustFusion(
                 trust_params,
-                params.get('physical_consistency', {})
+                params.get('physical_consistency', {}),
+                reputation_update_config=params.get('reputation_update', {}),
+                track_config=params.get('track_association', {}),
             )
 
     def __getitem__(self, idx):
@@ -342,13 +344,41 @@ class LateFusionDataset(basedataset.BaseDataset):
             if decoded is not None:
                 cav_detections.append(decoded)
 
-        trusted_detections, _ = self.trust_fusion.apply(cav_detections)
+        frame_context = self._trust_frame_context(cav_detections)
+        trusted_detections, trust_debug = self.trust_fusion.apply(
+            cav_detections,
+            frame_context=frame_context)
         pred_box_tensor, pred_score = merge_and_nms(
             trusted_detections,
             self.post_processor.params['nms_thresh'])
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
 
         return pred_box_tensor, pred_score, gt_box_tensor
+
+    def _trust_frame_context(self, cav_detections):
+        if not cav_detections:
+            return {
+                'frame': self.trust_fusion.frame_counter,
+                'frame_index': self.trust_fusion.frame_counter,
+                'scenario_index': -1,
+                'timestamp': '',
+                'timestamp_index': -1,
+                'num_cavs': 0,
+                'ego_id': 'ego',
+            }
+        first = cav_detections[0]
+        ego_det = next((det for det in cav_detections
+                        if det.get('is_ego', False)), first)
+        return {
+            'frame': self.trust_fusion.frame_counter,
+            'frame_index': self.trust_fusion.frame_counter,
+            'scenario_index': first.get('scenario_index', -1),
+            'timestamp': first.get('timestamp', ''),
+            'timestamp_index': first.get('timestamp_index', -1),
+            'num_cavs': len(cav_detections),
+            'ego_id': str(ego_det.get('trust_id',
+                                      ego_det.get('cav_id', 'ego'))),
+        }
 
     def _decode_single_cav_detection(self, cav_id, cav_content, cav_output):
         transformation_matrix = cav_content['transformation_matrix']
@@ -400,4 +430,6 @@ class LateFusionDataset(basedataset.BaseDataset):
             'boxes2d': projected_boxes2d,
             'scores': scores,
             'labels': labels,
+            'lidar_pose': cav_content.get('lidar_pose'),
+            'ego_lidar_pose': cav_content.get('ego_lidar_pose'),
         }

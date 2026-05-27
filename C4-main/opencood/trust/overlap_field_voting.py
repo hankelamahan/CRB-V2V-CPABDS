@@ -101,9 +101,12 @@ class OverlapFieldVoter:
 class OverlapFieldVotingSystem:
     """Build voting consensus and check leave-one-out consistency."""
 
-    def __init__(self, iou_thr=0.5, skip_box_thr=1e-4):
+    def __init__(self, iou_thr=0.5, skip_box_thr=1e-4,
+                 min_reference_agents=1, min_matched_boxes=1):
         self.voter = OverlapFieldVoter(iou_thr=iou_thr,
                                        skip_box_thr=skip_box_thr)
+        self.min_reference_agents = int(min_reference_agents)
+        self.min_matched_boxes = int(min_matched_boxes)
 
     def fuse(self, detections_dict):
         agent_ids = list(detections_dict.keys())
@@ -128,29 +131,60 @@ class OverlapFieldVotingSystem:
             detection set, so the caller should not update that agent's
             reputation for this frame.
         """
-        consistency = {}
+        details = self.compute_consistency_details(detections_dict,
+                                                   iou_thr=iou_thr)
+        return {
+            agent_id: item['consistent']
+            for agent_id, item in details.items()
+        }
+
+    def compute_consistency_details(self, detections_dict, iou_thr=0.5):
+        """Return leave-one-out consistency and debug metadata."""
+        details = {}
         for target_id, target_det in detections_dict.items():
             reference_detections = {
                 agent_id: detections
                 for agent_id, detections in detections_dict.items()
                 if agent_id != target_id
             }
-            if not reference_detections:
-                consistency[target_id] = None
+            reference_count = len(reference_detections)
+            if reference_count < self.min_reference_agents:
+                details[target_id] = {
+                    'consistent': None,
+                    'reason': 'insufficient_reference_agents',
+                    'reference_agent_count': reference_count,
+                    'matched_boxes': 0,
+                    'unmatched_boxes': len(target_det.get('boxes', [])),
+                    'consistency_ratio': None,
+                }
                 continue
 
             fused_reference = self.fuse(reference_detections)
-            consistency[target_id] = self.compare_to_fused(
+            details[target_id] = self.compare_to_fused_details(
                 target_det, fused_reference, iou_thr=iou_thr)
-        return consistency
+            details[target_id]['reference_agent_count'] = reference_count
+        return details
 
     def compare_to_fused(self, detections, fused_output, iou_thr=0.5):
         """Return whether one agent's detections agree with fused boxes."""
+        return self.compare_to_fused_details(
+            detections,
+            fused_output,
+            iou_thr=iou_thr)['consistent']
+
+    def compare_to_fused_details(self, detections, fused_output, iou_thr=0.5):
+        """Return consistency plus matched/unmatched debug counts."""
         fused_boxes, _, fused_labels = fused_output
         boxes = detections.get('boxes', [])
         labels = detections.get('labels', [])
         if len(fused_boxes) == 0 or len(boxes) == 0:
-            return False
+            return {
+                'consistent': False,
+                'reason': 'empty_reference_or_target',
+                'matched_boxes': 0,
+                'unmatched_boxes': len(boxes),
+                'consistency_ratio': 0.0,
+            }
 
         matched = 0
         consistent = 0
@@ -169,4 +203,20 @@ class OverlapFieldVotingSystem:
             if label == fused_labels[best_idx]:
                 consistent += 1
 
-        return matched > 0 and (float(consistent) / float(matched)) > 0.7
+        unmatched = len(boxes) - matched
+        ratio = float(consistent) / float(matched) if matched > 0 else 0.0 #cause the label always is 1,so the consistent is always equal to matched,so the ratio is always 1.0.
+        if matched < self.min_matched_boxes:
+            return {
+                'consistent': False,
+                'reason': 'insufficient_matched_boxes',
+                'matched_boxes': matched,
+                'unmatched_boxes': unmatched,
+                'consistency_ratio': ratio,
+            }
+        return {
+            'consistent': ratio > 0.7,
+            'reason': 'matched',
+            'matched_boxes': matched,
+            'unmatched_boxes': unmatched,
+            'consistency_ratio': ratio,
+        }

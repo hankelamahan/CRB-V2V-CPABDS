@@ -30,6 +30,8 @@ class VehicleReputationCache:
             return default
 
         reputation = self._server_sync_callback(vehicle_id)
+        if reputation is None:
+            return default
         self.update(vehicle_id, reputation)
         return reputation
 
@@ -52,4 +54,3 @@ class VehicleReputationCache:
             else:
                 del self._cache[vehicle_id]
         return valid
-

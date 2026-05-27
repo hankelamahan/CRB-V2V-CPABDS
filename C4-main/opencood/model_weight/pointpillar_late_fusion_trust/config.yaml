@@ -16,19 +16,49 @@ fusion:
 trust_fusion:
   use_trust_fusion: true
   mode: trust_nms
+  consistency_mode: leave_one_out
+  min_reference_agents: 1
+  min_matched_boxes: 1
   iou_thr: 0.5
+  skip_box_thr: 1.0e-4
   update_rate: 0.1
   default_reputation: 0.5
   min_reputation: 0.0
-  drop_below: 0.9
+  max_reputation: 1.0
+  drop_below: 0.5
   score_power: 1.0
   ego_reputation: 1.0
   reputation_map: ""
+  reputation_source:
+    type: none
+    path: ""
+    vehicle_id_column: vehicle_id
+    reputation_column: reputation
   id_map: ""
   log_reputation: true
-  log_dir: "logs/trust/trust_logs"
+  log_dir: "logs/trust/test4_Physcial"
+reputation_update:
+  positive_rate: 0.10
+  negative_rate: 0.10
+  unknown_rate: 0.0
+  good_thr: 0.7
+  bad_thr: 0.4
+  max_per_frame_delta: 0.10
 physical_consistency:
-  use_physical_consistency: false
+  use_physical_consistency: true
+  frame_interval: 0.05
+  residual_sigma: 5.0
+  velocity_sigma: 10.0
+  max_valid_speed: 40.0
+  history_window: 5
+  weights:
+    voting: 0.4
+    motion: 0.3
+    consensus_motion: 0.3
+track_association:
+  max_center_distance: 4.0
+  min_bev_iou: 0.1
+  max_age: 3
 loss:
   args:
     cls_weight: 1.0

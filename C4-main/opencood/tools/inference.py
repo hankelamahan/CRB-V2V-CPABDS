@@ -69,6 +69,8 @@ def test_parser():
                         help='limit the number of evaluated frames. '
                              'Use 0 or a negative value to process the full '
                              'validation set.')
+    parser.add_argument('--num_workers', type=int, default=16,
+                        help='number of DataLoader workers for inference.')
     parser.add_argument('--pred_only', action='store_true',
                         help='only render prediction boxes.')
     parser.add_argument('--gt_only', action='store_true',
@@ -97,7 +99,7 @@ def main():
     print(f"{len(opencood_dataset)} samples found.")
     data_loader = DataLoader(opencood_dataset,
                              batch_size=1,
-                             num_workers=16,
+                             num_workers=opt.num_workers,
                              collate_fn=opencood_dataset.collate_batch_test,
                              shuffle=False,
                              pin_memory=False,
