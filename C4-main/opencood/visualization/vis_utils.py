@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib import cm
+from matplotlib.patches import Rectangle
 
 from opencood.utils import box_utils
 from opencood.utils import common_utils
@@ -47,6 +48,157 @@ def get_background_color(background):
 def get_foreground_color(background):
     background_rgb = get_background_color(background)
     return 'black' if np.mean(background_rgb) >= 0.5 else 'white'
+
+
+def _format_overlay_score(value):
+    if value is None:
+        return '--'
+    try:
+        return '%.2f' % float(value)
+    except (TypeError, ValueError):
+        return '--'
+
+
+def _sort_overlay_cavs(cavs):
+    def key(item):
+        cav_id = str(item[0])
+        return (0, int(cav_id)) if cav_id.isdigit() else (1, cav_id)
+    return sorted(cavs.items(), key=key)
+
+
+def draw_trust_reputation_overlay_plt(ax, trust_overlay):
+    """Draw a compact per-CAV reputation banner on matplotlib output."""
+    if not trust_overlay:
+        return
+
+    fig = ax.figure
+    summary = trust_overlay.get('summary', {}) or {}
+    cavs = trust_overlay.get('cavs', {}) or {}
+    mode = summary.get('mode', 'trust')
+    frame = summary.get('frame', summary.get('frame_index', None))
+    drop_below = summary.get('drop_below', None)
+    try:
+        drop_below = None if drop_below is None else float(drop_below)
+    except (TypeError, ValueError):
+        drop_below = None
+
+    title = 'Trust Reputation'
+    if frame is not None:
+        title += ' | frame %05d' % int(frame)
+    if drop_below is not None:
+        title += ' | drop %.2f' % drop_below
+
+    if not cavs:
+        panel_x = 0.13
+        panel_y = 0.925
+        panel_width = 0.28
+        panel_height = 0.045
+        fig.add_artist(Rectangle((panel_x, panel_y),
+                                 panel_width,
+                                 panel_height,
+                                 transform=fig.transFigure,
+                                 facecolor=(0, 0, 0, 0.68),
+                                 edgecolor=(1, 1, 1, 0.20),
+                                 linewidth=0.7,
+                                 zorder=20))
+        fig.text(panel_x + 0.010,
+                 panel_y + panel_height - 0.014,
+                 'Trust OFF | reputation N/A | mode: %s' % mode,
+                 transform=fig.transFigure,
+                 color='#d7dce2',
+                 fontsize=8.5,
+                 fontfamily='monospace',
+                 va='top',
+                 ha='left',
+                 zorder=21)
+        return
+
+    items = []
+    for cav_id, cav in _sort_overlay_cavs(cavs):
+        rep = cav.get('reputation_after',
+                      cav.get('reputation',
+                              cav.get('reputation_before')))
+        before = cav.get('num_boxes_before')
+        after = cav.get('num_boxes_after')
+        is_ego = bool(cav.get('is_ego', False))
+
+        try:
+            rep_float = None if rep is None else float(rep)
+        except (TypeError, ValueError):
+            rep_float = None
+
+        dropped = bool(before) and after == 0
+        below_threshold = drop_below is not None and \
+            rep_float is not None and rep_float < drop_below
+        if is_ego:
+            state = 'EGO'
+            color = '#62d9ff'
+        elif dropped or below_threshold:
+            state = 'DROP'
+            color = '#ff5252'
+        elif rep_float is not None and rep_float >= 0.8:
+            state = ''
+            color = '#80ff9f'
+        else:
+            state = ''
+            color = '#ffd166'
+
+        label = '%s:%s' % (str(cav_id), _format_overlay_score(rep))
+        if state:
+            label += ' %s' % state
+        items.append((label, color))
+
+    items_per_row = 5 if len(items) <= 10 else 6
+    rows = [
+        items[i:i + items_per_row]
+        for i in range(0, len(items), items_per_row)
+    ]
+    row_count = max(1, len(rows))
+    panel_x = 0.125
+    item_width = 0.085
+    panel_width = min(0.68, max(0.36,
+                                0.020 + item_width *
+                                min(items_per_row, len(items))))
+    line_height = 0.021
+    panel_height = 0.034 + row_count * line_height
+    panel_y = 0.985 - panel_height
+
+    fig.add_artist(Rectangle((panel_x, panel_y),
+                             panel_width,
+                             panel_height,
+                             transform=fig.transFigure,
+                             facecolor=(0, 0, 0, 0.66),
+                             edgecolor=(1, 1, 1, 0.20),
+                             linewidth=0.7,
+                             zorder=20))
+    fig.text(panel_x + 0.010,
+             panel_y + panel_height - 0.012,
+             title,
+             transform=fig.transFigure,
+             color='white',
+             fontsize=8.5,
+             fontfamily='monospace',
+             fontweight='bold',
+             va='top',
+             ha='left',
+             zorder=21)
+
+    usable_width = panel_width - 0.020
+    col_width = usable_width / float(items_per_row)
+    for row_idx, row in enumerate(rows):
+        y = panel_y + panel_height - 0.033 - row_idx * line_height
+        for col_idx, (label, color) in enumerate(row):
+            x = panel_x + 0.010 + col_idx * col_width
+            fig.text(x,
+                     y,
+                     label,
+                     transform=fig.transFigure,
+                     color=color,
+                     fontsize=8.2,
+                     fontfamily='monospace',
+                     va='top',
+                     ha='left',
+                     zorder=21)
 
 
 def resolve_frame_indices(total_frames, frame_index=None, num_frames=1):
@@ -369,7 +521,9 @@ def visualize_single_sample_output_gt(pred_tensor,
                                       show_pred=True,
                                       show_gt=True,
                                       pc_range=None,
-                                      headless=False):
+                                      headless=False,
+                                      trust_overlay=None,
+                                      gt_labels=None):
     """
     Visualize the prediction, groundtruth with point cloud together.
 
@@ -448,7 +602,9 @@ def visualize_single_sample_output_gt(pred_tensor,
                                       point_size=point_size,
                                       background_color=background_color,
                                       show_pred=show_pred,
-                                      show_gt=show_gt)
+                                      show_gt=show_gt,
+                                      trust_overlay=trust_overlay,
+                                      gt_labels=gt_labels)
 
 
 def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
@@ -832,6 +988,52 @@ def draw_corner_boxes_plt(boxes_corner,
     return ax
 
 
+def draw_gt_box_labels_plt(boxes_corner,
+                           labels,
+                           ax,
+                           background_color='dark'):
+    if boxes_corner is None or not labels:
+        return ax
+
+    boxes_np = boxes_corner
+    if not isinstance(boxes_np, np.ndarray):
+        boxes_np = common_utils.torch_tensor_to_numpy(boxes_np)
+    if len(boxes_np.shape) == 2:
+        boxes_np = boxes_np[np.newaxis, ...]
+
+    label_count = min(len(labels), boxes_np.shape[0])
+    foreground = get_foreground_color(background_color)
+    text_color = 'black' if foreground == 'black' else 'white'
+    face_color = (1, 1, 1, 0.72) if foreground == 'black' \
+        else (0, 0, 0, 0.62)
+    edge_color = (0, 0, 0, 0.35) if foreground == 'black' \
+        else (1, 1, 1, 0.35)
+
+    for idx in range(label_count):
+        label = labels[idx]
+        if label is None or label == '':
+            continue
+        center = boxes_np[idx][:4, :2].mean(axis=0)
+        ax.text(center[0],
+                center[1],
+                str(label),
+                color=text_color,
+                fontsize=7.2,
+                fontfamily='monospace',
+                fontweight='bold',
+                ha='center',
+                va='center',
+                zorder=12,
+                clip_on=True,
+                bbox={
+                    'boxstyle': 'square,pad=0.16',
+                    'facecolor': face_color,
+                    'edgecolor': edge_color,
+                    'linewidth': 0.4,
+                })
+    return ax
+
+
 def save_inference_sample_plt(pred_tensor,
                               gt_tensor,
                               pcd,
@@ -844,7 +1046,9 @@ def save_inference_sample_plt(pred_tensor,
                               point_size=1.0,
                               background_color='dark',
                               show_pred=True,
-                              show_gt=True):
+                              show_gt=True,
+                              trust_overlay=None,
+                              gt_labels=None):
     if len(pcd.shape) == 3:
         pcd = pcd[0]
 
@@ -875,8 +1079,13 @@ def save_inference_sample_plt(pred_tensor,
 
     if show_gt and gt_tensor is not None:
         draw_corner_boxes_plt(gt_tensor, ax, color='green')
+        draw_gt_box_labels_plt(gt_tensor,
+                               gt_labels,
+                               ax,
+                               background_color=background_color)
     if show_pred and pred_tensor is not None:
         draw_corner_boxes_plt(pred_tensor, ax, color='red')
+    draw_trust_reputation_overlay_plt(ax, trust_overlay)
 
     ensure_parent_dir(save_path)
     ax.figure.savefig(save_path, facecolor=ax.figure.get_facecolor())

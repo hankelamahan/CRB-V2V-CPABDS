@@ -75,6 +75,12 @@ def test_parser():
                         help='only render prediction boxes.')
     parser.add_argument('--gt_only', action='store_true',
                         help='only render ground-truth boxes.')
+    parser.add_argument('--show_reputation_overlay', action='store_true',
+                        help='draw per-CAV trust reputation values on saved '
+                             'visualization images when available.')
+    parser.add_argument('--show_gt_cav_ids', action='store_true',
+                        help='draw CAV ids inside their corresponding GT '
+                             'vehicle boxes on saved visualization images.')
     parser.add_argument('--global_sort_detections', action='store_true',
                         help='whether to globally sort detections by confidence score.'
                              'If set to True, it is the mainstream AP computing method,'
@@ -243,6 +249,31 @@ def main():
                     targeted_save_dir,
                     '%s_%s_frame_%05d.png' % (
                         opt.fusion_method, opt.color_mode, i))
+                trust_overlay = None
+                if opt.show_reputation_overlay:
+                    trust_overlay = getattr(opencood_dataset,
+                                            'last_trust_debug',
+                                            None)
+                    if trust_overlay is None:
+                        trust_overlay = {
+                            'summary': {
+                                'frame': i,
+                                'mode': 'trust_off',
+                            },
+                            'cavs': {},
+                        }
+                    else:
+                        trust_overlay = dict(trust_overlay)
+                        summary = dict(trust_overlay.get('summary', {}))
+                        summary.setdefault(
+                            'drop_below',
+                            hypes.get('trust_fusion', {}).get('drop_below'))
+                        trust_overlay['summary'] = summary
+                gt_cav_labels = None
+                if opt.show_gt_cav_ids or opt.show_reputation_overlay:
+                    gt_cav_labels = getattr(opencood_dataset,
+                                            'last_gt_cav_labels',
+                                            None)
                 vis_utils.visualize_single_sample_output_gt(
                     pred_box_tensor,
                     gt_box_tensor,
@@ -257,7 +288,9 @@ def main():
                     show_pred=not opt.gt_only,
                     show_gt=not opt.pred_only,
                     pc_range=hypes['preprocess']['cav_lidar_range'],
-                    headless=opt.headless)
+                    headless=opt.headless,
+                    trust_overlay=trust_overlay,
+                    gt_labels=gt_cav_labels)
                 print('saved frame %d to %s' % (i, targeted_save_path))
 
             if opt.show_sequence:

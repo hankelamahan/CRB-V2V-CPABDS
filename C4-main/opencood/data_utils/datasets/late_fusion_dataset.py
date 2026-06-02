@@ -38,6 +38,8 @@ class LateFusionDataset(basedataset.BaseDataset):
         self.post_processor = build_postprocessor(params['postprocess'], train)
         trust_params = params.get('trust_fusion', {})
         self.trust_fusion = None
+        self.last_trust_debug = None
+        self.last_gt_cav_labels = None
         if trust_params.get('use_trust_fusion', False):
             self.trust_fusion = LateTrustFusion(
                 trust_params,
@@ -322,9 +324,13 @@ class LateFusionDataset(basedataset.BaseDataset):
         if self.trust_fusion is not None:
             return self.post_process_trust(data_dict, output_dict)
 
+        self.last_trust_debug = None
         pred_box_tensor, pred_score = \
             self.post_processor.post_process(data_dict, output_dict)
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
+        self.last_gt_cav_labels = self._label_gt_boxes_with_cav_ids(
+            data_dict,
+            gt_box_tensor)
 
         return pred_box_tensor, pred_score, gt_box_tensor
 
@@ -348,12 +354,97 @@ class LateFusionDataset(basedataset.BaseDataset):
         trusted_detections, trust_debug = self.trust_fusion.apply(
             cav_detections,
             frame_context=frame_context)
+        self.last_trust_debug = trust_debug
         pred_box_tensor, pred_score = merge_and_nms(
             trusted_detections,
             self.post_processor.params['nms_thresh'])
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
+        self.last_gt_cav_labels = self._label_gt_boxes_with_cav_ids(
+            data_dict,
+            gt_box_tensor)
 
         return pred_box_tensor, pred_score, gt_box_tensor
+
+    def _label_gt_boxes_with_cav_ids(self, data_dict, gt_box_tensor):
+        """
+        Build per-GT-box labels for CAV self vehicles only.
+
+        The GT tensor is a de-duplicated scene-level box list, while the
+        original CAV ids live in each CAV's object_ids. Match by projected box
+        center so visualization labels stay aligned with the final GT tensor.
+        """
+        if gt_box_tensor is None:
+            return []
+
+        num_gt = int(gt_box_tensor.shape[0])
+        labels = [None] * num_gt
+        if num_gt == 0:
+            return labels
+
+        cav_ids = set()
+        for cav_key, cav_content in data_dict.items():
+            original_cav_id = cav_content.get('original_cav_id', cav_key)
+            cav_ids.add(str(original_cav_id))
+        if not cav_ids:
+            return labels
+
+        gt_centers = gt_box_tensor[:, :, :2].mean(dim=1)
+        best_match_by_cav = {}
+        order = self.post_processor.params['order']
+
+        for cav_content in data_dict.values():
+            object_ids = cav_content.get('object_ids', [])
+            object_bbx_center = cav_content.get('object_bbx_center')
+            object_bbx_mask = cav_content.get('object_bbx_mask')
+            transformation_matrix = cav_content.get('transformation_matrix')
+            if not object_ids or object_bbx_center is None or \
+                    object_bbx_mask is None or transformation_matrix is None:
+                continue
+
+            if len(object_bbx_center.shape) > 2:
+                object_bbx_center = object_bbx_center[0]
+            if len(object_bbx_mask.shape) > 1:
+                object_bbx_mask = object_bbx_mask[0]
+
+            valid_boxes = object_bbx_center[object_bbx_mask == 1]
+            valid_count = min(len(object_ids), int(valid_boxes.shape[0]))
+            for box_idx in range(valid_count):
+                cav_id = str(object_ids[box_idx])
+                if cav_id not in cav_ids:
+                    continue
+
+                object_box = valid_boxes[box_idx:box_idx + 1]
+                object_corner = box_utils.boxes_to_corners_3d(
+                    object_box,
+                    order)
+                projected_corner = box_utils.project_box3d(
+                    object_corner.float(),
+                    transformation_matrix)
+                candidate_center = projected_corner[:, :, :2].mean(dim=1)[0]
+                distances = torch.norm(
+                    gt_centers - candidate_center.reshape(1, 2),
+                    dim=1)
+                distance, gt_idx = torch.min(distances, dim=0)
+                distance = float(distance.detach().cpu().item())
+                if distance > 3.0:
+                    continue
+
+                previous = best_match_by_cav.get(cav_id)
+                if previous is None or distance < previous[1]:
+                    best_match_by_cav[cav_id] = (
+                        int(gt_idx.detach().cpu().item()),
+                        distance)
+
+        used_gt_indices = set()
+        for cav_id, (gt_idx, distance) in sorted(
+                best_match_by_cav.items(),
+                key=lambda item: item[1][1]):
+            if gt_idx in used_gt_indices:
+                continue
+            labels[gt_idx] = cav_id
+            used_gt_indices.add(gt_idx)
+
+        return labels
 
     def _trust_frame_context(self, cav_detections):
         if not cav_detections:

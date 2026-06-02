@@ -57,6 +57,14 @@ def load_saved_model(saved_path, model):
         checkpoint = torch.load(
             model_file,
             map_location='cpu')
+        model_state = model.state_dict()
+        for key, value in list(checkpoint.items()):
+            if key not in model_state or value.ndim != 5:
+                continue
+            target_shape = model_state[key].shape
+            spconv2_value = value.permute(4, 0, 1, 2, 3).contiguous()
+            if spconv2_value.shape == target_shape:
+                checkpoint[key] = spconv2_value
         model.load_state_dict(checkpoint, strict=False)
 
         del checkpoint
