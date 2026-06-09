@@ -6,7 +6,7 @@
 
 import time
 from collections import OrderedDict
-from typing import Dict, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Tuple
 
 
 class VehicleReputationCache:
@@ -27,7 +27,7 @@ class VehicleReputationCache:
         """
         self.capacity = capacity
         self.ttl = ttl
-        self._cache: OrderedDict[str, tuple[float, float]] = OrderedDict()  # {vehicle_id: (reputation, timestamp)}
+        self._cache: OrderedDict = OrderedDict()  # {vehicle_id: (reputation, timestamp)}
         self._server_sync_callback = server_sync_callback
 
     def _is_valid(self, timestamp: float) -> bool:
@@ -94,7 +94,7 @@ class VehicleReputationCache:
         for vid, rep in updates.items():
             self.update(vid, rep)
 
-    def sync_from_server(self, vehicle_ids: list[str]):
+    def sync_from_server(self, vehicle_ids: List[str]):
         """
         主动从中心服务器同步一批车辆的信誉。
 

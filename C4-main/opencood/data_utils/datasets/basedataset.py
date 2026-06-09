@@ -115,10 +115,20 @@ class BaseDataset(Dataset):
         else:
             self.max_cav = params['train_params']['max_cav']
 
-        # first load all paths of different scenarios
-        scenario_folders = sorted([os.path.join(root_dir, x)
-                                   for x in os.listdir(root_dir) if
-                                   os.path.isdir(os.path.join(root_dir, x))])
+        # first load all paths of different scenarios. Usually root_dir is a
+        # split folder containing scenario folders, but support a direct
+        # single-scenario folder such as .../episode_0000 as well.
+        child_folders = sorted([os.path.join(root_dir, x)
+                                for x in os.listdir(root_dir) if
+                                os.path.isdir(os.path.join(root_dir, x))])
+
+        def is_cav_folder(folder):
+            return any(x.endswith('.yaml') and 'additional' not in x
+                       for x in os.listdir(folder))
+
+        scenario_folders = [root_dir] if any(is_cav_folder(x)
+                                             for x in child_folders) \
+            else child_folders
         # Structure: {scenario_id : {cav_1 : {timestamp1 : {yaml: path,
         # lidar: path, cameras:list of path}}}}
         self.scenario_database = OrderedDict()

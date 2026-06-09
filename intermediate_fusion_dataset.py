@@ -23,9 +23,66 @@ from opencood.utils.pcd_utils import \
     downsample_lidar_minimum
 from opencood.utils.transformation_utils import x1_to_x2
 
-# ========== [新增] 导入重叠视场投票模块 ==========
 from opencood.data_utils.datasets.overlap_field_voting import OverlapFieldVotingSystem
-# ========== [新增结束] ==========
+from reputation_client import ReputationClient
+
+
+
+class ReputationClientAdapter:
+    """
+    Bridges ReputationClient (HTTP-backed) with the interface expected by
+    IntermediateFusionDataset: get per-vehicle reputation scores and report
+    fused detection results back to the server.
+
+    Ego vehicle always returns 1.0 without a network round-trip.
+    numpy arrays are serialised to plain lists before being handed to the
+    HTTP client.
+    """
+
+    def __init__(self, client: ReputationClient, ego_id: str = "ego"):
+        self._client = client
+        self._ego_id = str(ego_id)
+
+    def get_reputation(self, vehicle_id: str) -> float:
+        if str(vehicle_id) == self._ego_id:
+            return 1.0
+        return self._client.get_reputation(str(vehicle_id))
+
+    def get_batch_reputations(self, vehicle_ids) -> dict:
+        non_ego = [str(v) for v in vehicle_ids if str(v) != self._ego_id]
+        result = self._client.get_batch_reputations(non_ego)
+        for vid in vehicle_ids:
+            if str(vid) == self._ego_id:
+                result[str(vid)] = 1.0
+        return result
+
+    def report_fused_boxes(
+        self,
+        fused_boxes,
+        fused_scores,
+        fused_labels,
+        cav_detections: dict,
+    ) -> dict:
+        """Upload fused boxes and per-CAV detections; return updated reputations."""
+        def _to_list(x):
+            return x.tolist() if hasattr(x, "tolist") else list(x)
+
+        serialised_detections = {}
+        for cav_id, det in cav_detections.items():
+            serialised_detections[str(cav_id)] = {
+                "boxes":  _to_list(det["boxes"]),
+                "scores": _to_list(det["scores"]),
+                "labels": _to_list(det["labels"]),
+            }
+
+        return self._client.report_fused_boxes(
+            reporter_id=self._ego_id,
+            fused_boxes=_to_list(fused_boxes),
+            fused_scores=_to_list(fused_scores),
+            fused_labels=_to_list(fused_labels),
+            cav_detections=serialised_detections,
+        )
+
 
 
 class IntermediateFusionDataset(basedataset.BaseDataset):
@@ -60,17 +117,21 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
         # ========== [新增] 初始化重叠视场投票系统 ==========
         # 从配置文件中读取参数，如果没有则使用默认值
         trust_params = params.get('trust_fusion', {})
-        self.use_trust_fusion = trust_params.get('use_trust_fusion', True)  # 是否启用信誉加权融合
-        self.voting_system = None
+        self.use_trust_fusion = trust_params.get('use_trust_fusion', True)
+        self.reputation_adapter = None
+
         if self.use_trust_fusion:
-            self.voting_system = OverlapFieldVotingSystem(
-                iou_thr=trust_params.get('iou_thr', 0.5),
-                update_rate=trust_params.get('update_rate', 0.1),
-                default_reputation=trust_params.get('default_reputation', 0.5)
+            server_url = trust_params.get('reputation_server_url', 'http://localhost:8888')
+            reputation_client = ReputationClient(
+                server_url=server_url,
+                cache_capacity=trust_params.get('cache_capacity', 100),
+                cache_ttl=trust_params.get('cache_ttl', 60),
             )
-        # 存储当前帧各车的信誉值，用于后续更新
-        self.current_frame_reputations = {}
-        # 存储当前帧各车的原始检测结果，用于投票后更新信誉
+            self.reputation_adapter = ReputationClientAdapter(
+                client=reputation_client,
+                ego_id=str(params.get('ego_id', 'ego'))
+            )
+
         self.current_frame_detections = {}
         # ========== [新增结束] ==========
 
@@ -154,7 +215,7 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
             infra.append(1 if int(cav_id) < 0 else 0)
 
             # ========== [新增] 收集各车的检测结果，用于后续投票融合 ==========
-            if self.use_trust_fusion and self.voting_system is not None:
+            if self.use_trust_fusion and self.reputation_adapter is not None:
                 # 获取该车的检测框（已在get_item_single_car中转换为ego坐标系）
                 cav_boxes = selected_cav_processed.get('object_bbx_center', [])
                 # 注意：这里需要将7维检测框转换为WBF需要的4维[x1,y1,x2,y2]格式
@@ -596,47 +657,14 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
 
         return pairwise_t_matrix
 
-    # ========== [新增] 信誉值管理方法 ==========
-    def update_reputations_from_fusion(self):
-        """
-        根据上一帧的融合结果更新车辆信誉值
-        这个方法应该在每一帧处理完成后调用
-        """
-        if not self.use_trust_fusion or self.voting_system is None:
-            return
-        
-        # 如果有上一帧的融合结果和检测结果，执行信誉更新
-        if hasattr(self, 'last_fused_result') and hasattr(self, 'last_frame_detections'):
-            self.voting_system.update_reputations(
-                self.last_fused_result, 
-                self.last_frame_detections
-            )
-    
-    def set_vehicle_reputation(self, vehicle_id, score):
-        """手动设置车辆信誉值"""
-        if self.voting_system is not None:
-            self.voting_system.set_reputation(vehicle_id, score)
-    
     def get_vehicle_reputation(self, vehicle_id):
-        """获取车辆信誉值"""
-        if self.voting_system is not None:
-            return self.voting_system.get_reputation(vehicle_id)
+        """Get reputation score for a vehicle via the remote server."""
+        if self.reputation_adapter is not None:
+            return self.reputation_adapter.get_reputation(vehicle_id)
         return 0.5
-    
-    def get_all_reputations(self):
-        """获取所有车辆的信誉值"""
-        if self.voting_system is not None:
-            return self.voting_system.get_all_reputations()
-        return {}
-    
-    def load_reputations_from_cache(self, cache_dict):
-        """
-        从本地缓存加载信誉值
-        
-        参数:
-            cache_dict: 字典 {vehicle_id: reputation_score}
-        """
-        if self.voting_system is not None:
-            for vid, score in cache_dict.items():
-                self.voting_system.set_reputation(vid, score)
-    # ========== [新增结束] ==========
+
+    def get_batch_reputations(self, vehicle_ids):
+        """Batch-fetch reputation scores for multiple vehicles."""
+        if self.reputation_adapter is not None:
+            return self.reputation_adapter.get_batch_reputations(vehicle_ids)
+        return {str(vid): 0.5 for vid in vehicle_ids}

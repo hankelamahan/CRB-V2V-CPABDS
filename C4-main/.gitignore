@@ -141,3 +141,33 @@ spconv/
 .codex
 v2xset/
 images/*.gif
+
+# Local datasets, generated experiment outputs, and media artifacts
+/Dataset/
+/dataset/
+/data/
+/Results/
+/results/
+/outputs/
+/output/
+/videos/
+/video/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.npy
+*.npz
+*.pcd
+
+# Downloaded/generated model artifacts
+opencood/model_weight/old/
+opencood/model_weight/pointpillar_late_fusion_trust_visual_baseline/
+opencood/model_weight/pointpillar_late_fusion_trust_visual_trust/
+opencood/model_weight/**/*_origin.pth
+opencood/model_weight/**/*.pth
+opencood/model_weight/**/*.pt
+opencood/model_weight/**/*.ckpt
+opencood/model_weight/**/*.zip
+opencood/model_weight/**/eval.yaml
