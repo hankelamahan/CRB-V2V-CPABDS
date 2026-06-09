@@ -1,0 +1,54 @@
+1️⃣ 信誉LSTM（模块二）集成到RSU服务器
+涉及文件：reputation_center_server.py
+
+需要修改的部分：
+
+导入LSTM预测器（文件开头）：
+
+python
+from lstm_enhancement.reputation_predictor import ReputationPredictor
+初始化全局预测器（在app定义之后，或init_db之后）：
+
+python
+predictor = ReputationPredictor(model_path="reputation_lstm.pth", seq_len=10, threshold=0.15)
+在update_reputation函数中：
+
+计算new_rep之后，调用predictor.update_history(vehicle_id, new_rep)
+
+调用predictor.check_anomaly(vehicle_id, new_rep)得到预警
+
+如果异常，可额外扣减信誉值（例如 new_rep -= 0.05 并重新 clamp）
+
+可选：添加一个API端点返回预警分数（例如 /early_warning/{vehicle_id}）
+
+2️⃣ 物理LSTM（模块一）集成到车辆端异常检测
+涉及文件：intermediate_fusion_dataset.py 或你实际做异常检测的模块（可能是overlap_field_voting.py或单独的检测器）
+
+需要修改的部分：
+
+导入物理LSTM预测器：
+
+python
+from lstm_enhancement.physics_predictor import PhysicsPredictor
+在__init__中初始化：
+
+python
+self.physics_predictor = PhysicsPredictor(model_path="physics_lstm.pth", seq_len=10)
+在每帧处理每辆车时：
+
+从base_data_dict中提取该车的历史运动状态（需要事先缓存或从数据集读取连续帧的位置/速度）
+
+调用self.physics_predictor.update_history(cav_id, state)
+
+获取当前帧实际位置，调用self.physics_predictor.compute_anomaly_score(cav_id, current_pos)得到异常分数
+
+将这个异常分数作为物理一致性校验的一个输入（可以加权到原有的phy_score，或直接作为是否上报异常的判断依据）
+
+如果需要上报给RSU：将计算出的anomaly_score作为phy_score字段传给reputation_client.report_verification(...)
+
+3️⃣ 共同需要的准备工作
+训练模型：需要事先收集好正常数据（信誉序列/车辆轨迹），运行训练脚本生成.pth文件。
+
+路径调整：确保模型文件路径在初始化预测器时正确。
+
+依赖安装：torch, numpy 等。
