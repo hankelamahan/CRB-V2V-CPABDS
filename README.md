@@ -1,4 +1,5 @@
 # RSU-Trust：基于中心化信誉的V2V协同感知异常行为防御系统
+feat. Chaokun Zhang, Yi Ji, Xiang Han, Jiaming Wang, YuanJie Ma, Chunpeng Wang, Daichen Li
 
 本项目面向车联网（V2V）协同感知中的信息安全问题，提出并实现了一套基于中心化信誉服务器的异常行为检测与信任评估系统。系统通过部署路侧单元（RSU）作为信誉管理中心，结合物理一致性校验、重叠视场交叉验证与加权框融合（WBF）算法，有效防御幽灵车攻击、紧急刹车欺诈、障碍物伪造等恶意行为。
 
@@ -34,4 +35,3 @@
 pip install -r requirements.txt
 
 
-feat. ZhangChaokun, Ji Yi, Han Xiang, Wang Jiaming, Ma YuanJie, Wang Chunpeng 
