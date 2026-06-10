@@ -12,7 +12,7 @@ feat. Chaokun Zhang, Yi Ji, Xiang Han, Jiaming Wang, YuanJie Ma, Chunpeng Wang, 
 
 ## 系统架构
 
-[数据流图](docs/images/dataflow.png)
+[数据流图](pic/v2vflow.png)
 
 基于OpenCOOD, 本系统由三个核心模块组成：
 - **车辆端异常检测模块**：物理一致性校验 + 重叠视场交叉验证
