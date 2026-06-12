@@ -14,7 +14,9 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib import cm
+from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+from matplotlib import colors as mpl_colors
 
 from opencood.utils import box_utils
 from opencood.utils import common_utils
@@ -26,6 +28,177 @@ BACKGROUND_PRESETS = {
     'black': (0.0, 0.0, 0.0),
     'white': (1.0, 1.0, 1.0),
 }
+SEMANTIC_COLORS = {
+    'prediction': '#ff3030',
+    'ego_gt': '#1e88e5',
+    'kept_gt': '#2ecc71',
+    'low_reputation_gt': '#f4c542',
+    'filtered_gt': '#00e5ff',
+}
+SEMANTIC_ROLE_STYLES = {
+    'pred': {
+        'color': SEMANTIC_COLORS['prediction'],
+        'linewidth': 0.95,
+        'linestyle': '-',
+        'label': 'Prediction',
+    },
+    'gt': {
+        'color': SEMANTIC_COLORS['kept_gt'],
+        'linewidth': 0.9,
+        'linestyle': '-',
+        'label': 'Keep GT',
+    },
+    'ego': {
+        'color': SEMANTIC_COLORS['ego_gt'],
+        'linewidth': 1.25,
+        'linestyle': '-',
+        'label': 'Ego GT',
+    },
+    'kept_cav': {
+        'color': SEMANTIC_COLORS['kept_gt'],
+        'linewidth': 0.9,
+        'linestyle': '-',
+        'label': 'Keep GT',
+    },
+    'low_reputation_cav': {
+        'color': SEMANTIC_COLORS['low_reputation_gt'],
+        'linewidth': 1.05,
+        'linestyle': '-',
+        'label': 'Low reputation GT',
+    },
+    'filtered_cav': {
+        'color': SEMANTIC_COLORS['filtered_gt'],
+        'linewidth': 1.15,
+        'linestyle': '--',
+        'label': 'Filtered GT',
+    },
+}
+
+
+def _normalize_cav_id(cav_id):
+    if cav_id is None:
+        return ''
+    return str(cav_id)
+
+
+def _to_float(value):
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trust_drop_below(trust_overlay=None, default=0.6):
+    if not trust_overlay:
+        return default
+    summary = trust_overlay.get('summary', {}) or {}
+    drop_below = _to_float(summary.get('drop_below'))
+    return default if drop_below is None else drop_below
+
+
+def _cav_reputation(cav):
+    return _to_float(cav.get('reputation_after',
+                             cav.get('reputation',
+                                     cav.get('reputation_before'))))
+
+
+def _blend_color(color_a, color_b, ratio):
+    ratio = max(0.0, min(1.0, float(ratio)))
+    rgb_a = np.asarray(mpl_colors.to_rgb(color_a), dtype=float)
+    rgb_b = np.asarray(mpl_colors.to_rgb(color_b), dtype=float)
+    return mpl_colors.to_hex(rgb_a * (1.0 - ratio) + rgb_b * ratio)
+
+
+def reputation_color(reputation, drop_below=0.6):
+    """
+    Map reputation to the GT color ramp: green -> yellow.
+
+    Filtered CAVs are handled separately as filtered red, so non-filtered low
+    reputation states remain visually distinguishable from prediction boxes.
+    """
+    reputation = _to_float(reputation)
+    if reputation is None:
+        return SEMANTIC_COLORS['kept_gt']
+
+    high_reputation = 0.85
+    if reputation >= high_reputation:
+        return SEMANTIC_COLORS['kept_gt']
+    if reputation <= drop_below:
+        return SEMANTIC_COLORS['low_reputation_gt']
+
+    ratio = (high_reputation - reputation) / (high_reputation - drop_below)
+    return _blend_color(SEMANTIC_COLORS['kept_gt'],
+                        SEMANTIC_COLORS['low_reputation_gt'],
+                        ratio)
+
+
+def _text_color_for_fill(color):
+    rgb = np.asarray(mpl_colors.to_rgb(color), dtype=float)
+    luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    return 'black' if luminance > 0.58 else 'white'
+
+
+def _semantic_cavs(trust_overlay=None, semantic_context=None):
+    cavs = {}
+    if trust_overlay:
+        for cav_id, cav in (trust_overlay.get('cavs', {}) or {}).items():
+            cavs[_normalize_cav_id(cav_id)] = dict(cav or {})
+    if semantic_context:
+        for cav_id, cav in (semantic_context.get('cavs', {}) or {}).items():
+            normalized_id = _normalize_cav_id(cav_id)
+            merged = cavs.get(normalized_id, {})
+            merged.update(cav or {})
+            cavs[normalized_id] = merged
+    return cavs
+
+
+def semantic_cav_style(cav_id, trust_overlay=None, semantic_context=None):
+    """Resolve a CAV-specific style from trust/debug metadata."""
+    cav_id = _normalize_cav_id(cav_id)
+    cavs = _semantic_cavs(trust_overlay, semantic_context)
+    cav = cavs.get(cav_id, {})
+    is_ego = bool(cav.get('is_ego', False))
+    boxes_before = cav.get('num_boxes_before')
+    boxes_after = cav.get('num_boxes_after')
+    try:
+        boxes_before = 0 if boxes_before is None else int(boxes_before)
+        boxes_after = boxes_before if boxes_after is None else int(boxes_after)
+    except (TypeError, ValueError):
+        boxes_before = 0
+        boxes_after = 0
+
+    state = cav.get('state')
+    if state is None:
+        if is_ego:
+            state = 'ego'
+        elif boxes_before > 0 and boxes_after == 0:
+            state = 'filtered'
+        else:
+            state = 'kept'
+
+    reputation = _cav_reputation(cav)
+    drop_below = _trust_drop_below(trust_overlay)
+
+    if state == 'ego':
+        role_style = SEMANTIC_ROLE_STYLES['ego']
+    elif state == 'filtered':
+        role_style = SEMANTIC_ROLE_STYLES['filtered_cav']
+    elif reputation is not None and reputation < 0.85:
+        role_style = SEMANTIC_ROLE_STYLES['low_reputation_cav']
+    else:
+        role_style = SEMANTIC_ROLE_STYLES['kept_cav']
+
+    style = dict(role_style)
+    style['state'] = state
+    style['is_ego'] = is_ego
+    style['reputation'] = reputation
+    if state == 'ego':
+        style['color'] = SEMANTIC_COLORS['ego_gt']
+    elif state == 'filtered':
+        style['color'] = SEMANTIC_COLORS['filtered_gt']
+    else:
+        style['color'] = reputation_color(reputation, drop_below)
+    return style
 
 
 def ensure_parent_dir(path):
@@ -122,26 +295,25 @@ def draw_trust_reputation_overlay_plt(ax, trust_overlay):
         after = cav.get('num_boxes_after')
         is_ego = bool(cav.get('is_ego', False))
 
-        try:
-            rep_float = None if rep is None else float(rep)
-        except (TypeError, ValueError):
-            rep_float = None
+        rep_float = _to_float(rep)
 
         dropped = bool(before) and after == 0
         below_threshold = drop_below is not None and \
             rep_float is not None and rep_float < drop_below
         if is_ego:
             state = 'EGO'
-            color = '#62d9ff'
+            color = SEMANTIC_COLORS['ego_gt']
         elif dropped or below_threshold:
             state = 'DROP'
-            color = '#ff5252'
-        elif rep_float is not None and rep_float >= 0.8:
+            color = SEMANTIC_COLORS['filtered_gt']
+        elif rep_float is not None and rep_float >= 0.85:
             state = ''
-            color = '#80ff9f'
+            color = SEMANTIC_COLORS['kept_gt']
         else:
             state = ''
-            color = '#ffd166'
+            color = reputation_color(rep_float,
+                                     0.6 if drop_below is None
+                                     else drop_below)
 
         label = '%s:%s' % (str(cav_id), _format_overlay_score(rep))
         if state:
@@ -523,7 +695,9 @@ def visualize_single_sample_output_gt(pred_tensor,
                                       pc_range=None,
                                       headless=False,
                                       trust_overlay=None,
-                                      gt_labels=None):
+                                      gt_labels=None,
+                                      semantic_context=None,
+                                      show_semantic_legend=False):
     """
     Visualize the prediction, groundtruth with point cloud together.
 
@@ -604,7 +778,9 @@ def visualize_single_sample_output_gt(pred_tensor,
                                       show_pred=show_pred,
                                       show_gt=show_gt,
                                       trust_overlay=trust_overlay,
-                                      gt_labels=gt_labels)
+                                      gt_labels=gt_labels,
+                                      semantic_context=semantic_context,
+                                      show_semantic_legend=show_semantic_legend)
 
 
 def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
@@ -965,7 +1141,10 @@ def save_sequence_sample_plt(batch_data,
 def draw_corner_boxes_plt(boxes_corner,
                           ax,
                           color=None,
-                          linewidth_scale=1.0):
+                          linewidth_scale=1.0,
+                          linestyle='-',
+                          alpha=1.0,
+                          zorder=9):
     if boxes_corner is None:
         return ax
 
@@ -980,18 +1159,58 @@ def draw_corner_boxes_plt(boxes_corner,
         ax.plot(bev[[0, 1, 2, 3, 0], 0],
                 bev[[0, 1, 2, 3, 0], 1],
                 color=color,
-                linewidth=0.8 * linewidth_scale)
+                linewidth=0.8 * linewidth_scale,
+                linestyle=linestyle,
+                alpha=alpha,
+                zorder=zorder)
         ax.plot(bev[[2, 3], 0],
                 bev[[2, 3], 1],
                 color=color,
-                linewidth=2.0 * linewidth_scale)
+                linewidth=2.0 * linewidth_scale,
+                linestyle=linestyle,
+                alpha=alpha,
+                zorder=zorder)
+    return ax
+
+
+def draw_semantic_gt_boxes_plt(boxes_corner,
+                               labels,
+                               ax,
+                               trust_overlay=None,
+                               semantic_context=None):
+    if boxes_corner is None:
+        return ax
+
+    boxes_np = boxes_corner
+    if not isinstance(boxes_np, np.ndarray):
+        boxes_np = common_utils.torch_tensor_to_numpy(boxes_np)
+    if len(boxes_np.shape) == 2:
+        boxes_np = boxes_np[np.newaxis, ...]
+
+    labels = labels or []
+    for idx, box in enumerate(boxes_np):
+        label = labels[idx] if idx < len(labels) else None
+        if label:
+            style = semantic_cav_style(label,
+                                       trust_overlay=trust_overlay,
+                                       semantic_context=semantic_context)
+        else:
+            style = SEMANTIC_ROLE_STYLES['gt']
+        draw_corner_boxes_plt(box[np.newaxis, ...],
+                              ax,
+                              color=style['color'],
+                              linewidth_scale=style.get('linewidth', 1.0),
+                              linestyle=style.get('linestyle', '-'),
+                              zorder=10)
     return ax
 
 
 def draw_gt_box_labels_plt(boxes_corner,
                            labels,
                            ax,
-                           background_color='dark'):
+                           background_color='dark',
+                           trust_overlay=None,
+                           semantic_context=None):
     if boxes_corner is None or not labels:
         return ax
 
@@ -1002,17 +1221,18 @@ def draw_gt_box_labels_plt(boxes_corner,
         boxes_np = boxes_np[np.newaxis, ...]
 
     label_count = min(len(labels), boxes_np.shape[0])
-    foreground = get_foreground_color(background_color)
-    text_color = 'black' if foreground == 'black' else 'white'
-    face_color = (1, 1, 1, 0.72) if foreground == 'black' \
-        else (0, 0, 0, 0.62)
-    edge_color = (0, 0, 0, 0.35) if foreground == 'black' \
-        else (1, 1, 1, 0.35)
 
     for idx in range(label_count):
         label = labels[idx]
         if label is None or label == '':
             continue
+        style = semantic_cav_style(label,
+                                   trust_overlay=trust_overlay,
+                                   semantic_context=semantic_context)
+        face_rgb = mpl_colors.to_rgb(style['color'])
+        face_color = (face_rgb[0], face_rgb[1], face_rgb[2], 0.82)
+        edge_color = style['color']
+        text_color = _text_color_for_fill(style['color'])
         center = boxes_np[idx][:4, :2].mean(axis=0)
         ax.text(center[0],
                 center[1],
@@ -1034,6 +1254,105 @@ def draw_gt_box_labels_plt(boxes_corner,
     return ax
 
 
+def _semantic_filtered_box_groups(semantic_context):
+    if not semantic_context:
+        return []
+    groups = []
+    for cav_id, cav in (semantic_context.get('cavs', {}) or {}).items():
+        style = semantic_cav_style(cav_id, semantic_context=semantic_context)
+        if style.get('state') != 'filtered':
+            continue
+        boxes = cav.get('boxes3d_before', cav.get('boxes3d'))
+        if boxes is None:
+            continue
+        groups.append((_normalize_cav_id(cav_id), boxes, style))
+    return groups
+
+
+def draw_filtered_cav_boxes_plt(ax, semantic_context=None):
+    for cav_id, boxes, style in _semantic_filtered_box_groups(
+            semantic_context):
+        draw_corner_boxes_plt(boxes,
+                              ax,
+                              color=style['color'],
+                              linewidth_scale=style.get('linewidth', 1.0),
+                              linestyle=style.get('linestyle', '--'),
+                              alpha=0.82,
+                              zorder=11)
+    return ax
+
+
+def draw_semantic_legend_plt(ax,
+                             trust_overlay=None,
+                             semantic_context=None,
+                             show_pred=True,
+                             show_gt=True):
+    handles = []
+    if show_pred:
+        pred_style = SEMANTIC_ROLE_STYLES['pred']
+        handles.append(Line2D([0], [0],
+                              color=pred_style['color'],
+                              linewidth=1.5,
+                              linestyle=pred_style['linestyle'],
+                              label=pred_style['label']))
+    cavs = _semantic_cavs(trust_overlay, semantic_context)
+    states = set()
+    has_low_reputation = False
+    for cav_id, cav in _sort_overlay_cavs(cavs):
+        style = semantic_cav_style(cav_id,
+                                   trust_overlay=trust_overlay,
+                                   semantic_context=semantic_context)
+        state = style.get('state', 'kept')
+        states.add(state)
+        has_low_reputation = has_low_reputation or \
+            (state not in ['ego', 'filtered'] and
+             style.get('reputation') is not None and
+             style.get('reputation') < 0.85)
+
+    if show_gt:
+        if not cavs or 'kept' in states:
+            kept_style = SEMANTIC_ROLE_STYLES['kept_cav']
+            handles.append(Line2D([0], [0],
+                                  color=kept_style['color'],
+                                  linewidth=1.6,
+                                  linestyle=kept_style['linestyle'],
+                                  label=kept_style['label']))
+        if 'ego' in states:
+            ego_style = SEMANTIC_ROLE_STYLES['ego']
+            handles.append(Line2D([0], [0],
+                                  color=ego_style['color'],
+                                  linewidth=1.8,
+                                  linestyle=ego_style['linestyle'],
+                                  label=ego_style['label']))
+        if has_low_reputation:
+            low_style = SEMANTIC_ROLE_STYLES['low_reputation_cav']
+            handles.append(Line2D([0], [0],
+                                  color=low_style['color'],
+                                  linewidth=1.8,
+                                  linestyle=low_style['linestyle'],
+                                  label=low_style['label']))
+        if 'filtered' in states:
+            filtered_style = SEMANTIC_ROLE_STYLES['filtered_cav']
+            handles.append(Line2D([0], [0],
+                                  color=filtered_style['color'],
+                                  linewidth=1.8,
+                                  linestyle=filtered_style['linestyle'],
+                                  label=filtered_style['label']))
+
+    if not handles:
+        return ax
+
+    legend = ax.legend(handles=handles,
+                       loc='lower right',
+                       framealpha=0.74,
+                       facecolor=(0, 0, 0, 0.72),
+                       edgecolor=(1, 1, 1, 0.22),
+                       fontsize=7.8)
+    for text in legend.get_texts():
+        text.set_color('white')
+    return ax
+
+
 def save_inference_sample_plt(pred_tensor,
                               gt_tensor,
                               pcd,
@@ -1048,7 +1367,9 @@ def save_inference_sample_plt(pred_tensor,
                               show_pred=True,
                               show_gt=True,
                               trust_overlay=None,
-                              gt_labels=None):
+                              gt_labels=None,
+                              semantic_context=None,
+                              show_semantic_legend=False):
     if len(pcd.shape) == 3:
         pcd = pcd[0]
 
@@ -1078,14 +1399,38 @@ def save_inference_sample_plt(pred_tensor,
                           background_color=background_color)
 
     if show_gt and gt_tensor is not None:
-        draw_corner_boxes_plt(gt_tensor, ax, color='green')
+        if semantic_context:
+            draw_semantic_gt_boxes_plt(gt_tensor,
+                                       gt_labels,
+                                       ax,
+                                       trust_overlay=trust_overlay,
+                                       semantic_context=semantic_context)
+        else:
+            draw_corner_boxes_plt(
+                gt_tensor,
+                ax,
+                color=SEMANTIC_ROLE_STYLES['gt']['color'])
         draw_gt_box_labels_plt(gt_tensor,
                                gt_labels,
                                ax,
-                               background_color=background_color)
+                               background_color=background_color,
+                               trust_overlay=trust_overlay,
+                               semantic_context=semantic_context)
     if show_pred and pred_tensor is not None:
-        draw_corner_boxes_plt(pred_tensor, ax, color='red')
+        pred_style = SEMANTIC_ROLE_STYLES['pred']
+        draw_corner_boxes_plt(pred_tensor,
+                              ax,
+                              color=pred_style['color'],
+                              linewidth_scale=pred_style['linewidth'],
+                              linestyle=pred_style['linestyle'])
+    draw_filtered_cav_boxes_plt(ax, semantic_context=semantic_context)
     draw_trust_reputation_overlay_plt(ax, trust_overlay)
+    if show_semantic_legend:
+        draw_semantic_legend_plt(ax,
+                                 trust_overlay=trust_overlay,
+                                 semantic_context=semantic_context,
+                                 show_pred=show_pred,
+                                 show_gt=show_gt)
 
     ensure_parent_dir(save_path)
     ax.figure.savefig(save_path, facecolor=ax.figure.get_facecolor())
@@ -1217,7 +1562,8 @@ def draw_points_boxes_plt(pc_range, points=None, boxes_pred=None, boxes_gt=None,
                        s=max(point_size, 0.1),
                        c=point_colors,
                        marker='.',
-                       linewidths=0)
+                       linewidths=0,
+                       zorder=3)
         else:
             ax.plot(points[:, 0], points[:, 1], points_c,
                     markersize=max(point_size, 0.1))

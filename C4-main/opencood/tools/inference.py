@@ -81,6 +81,12 @@ def test_parser():
     parser.add_argument('--show_gt_cav_ids', action='store_true',
                         help='draw CAV ids inside their corresponding GT '
                              'vehicle boxes on saved visualization images.')
+    parser.add_argument('--semantic_overlay', action='store_true',
+                        help='draw semantic styles and legend for pred, GT, '
+                             'ego, kept CAV and filtered CAV boxes.')
+    parser.add_argument('--hide_semantic_legend', action='store_true',
+                        help='hide the semantic legend when semantic overlay '
+                             'is enabled.')
     parser.add_argument('--global_sort_detections', action='store_true',
                         help='whether to globally sort detections by confidence score.'
                              'If set to True, it is the mainstream AP computing method,'
@@ -270,10 +276,19 @@ def main():
                             hypes.get('trust_fusion', {}).get('drop_below'))
                         trust_overlay['summary'] = summary
                 gt_cav_labels = None
-                if opt.show_gt_cav_ids or opt.show_reputation_overlay:
+                if opt.show_gt_cav_ids or opt.show_reputation_overlay or \
+                        opt.semantic_overlay:
                     gt_cav_labels = getattr(opencood_dataset,
                                             'last_gt_cav_labels',
                                             None)
+                semantic_context = None
+                if opt.semantic_overlay:
+                    base_context = getattr(opencood_dataset,
+                                           'last_semantic_context',
+                                           None) or {}
+                    semantic_context = {
+                        'cavs': dict(base_context.get('cavs', {}) or {}),
+                    }
                 vis_utils.visualize_single_sample_output_gt(
                     pred_box_tensor,
                     gt_box_tensor,
@@ -290,7 +305,10 @@ def main():
                     pc_range=hypes['preprocess']['cav_lidar_range'],
                     headless=opt.headless,
                     trust_overlay=trust_overlay,
-                    gt_labels=gt_cav_labels)
+                    gt_labels=gt_cav_labels,
+                    semantic_context=semantic_context,
+                    show_semantic_legend=opt.semantic_overlay and
+                    not opt.hide_semantic_legend)
                 print('saved frame %d to %s' % (i, targeted_save_path))
 
             if opt.show_sequence:

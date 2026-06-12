@@ -13,11 +13,7 @@ from opencood.models.sub_modules.naive_compress import NaiveCompressor
 from opencood.models.fuse_modules.V2VAM import V2V_AttFusion
 
 
-from opencood.models.sub_modules.noise import data_dropout, data_dropout_uniform,transmission_with_noise
-import numpy as np
 import torch
-from opencood.models.fuse_modules.self_attn import regroup
-import pdb
 
 class PointPillarintermediateV2VAM(nn.Module):
     """

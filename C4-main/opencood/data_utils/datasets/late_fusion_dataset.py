@@ -40,6 +40,7 @@ class LateFusionDataset(basedataset.BaseDataset):
         self.trust_fusion = None
         self.last_trust_debug = None
         self.last_gt_cav_labels = None
+        self.last_semantic_context = None
         if trust_params.get('use_trust_fusion', False):
             self.trust_fusion = LateTrustFusion(
                 trust_params,
@@ -325,12 +326,15 @@ class LateFusionDataset(basedataset.BaseDataset):
             return self.post_process_trust(data_dict, output_dict)
 
         self.last_trust_debug = None
+        self.last_semantic_context = None
         pred_box_tensor, pred_score = \
             self.post_processor.post_process(data_dict, output_dict)
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
         self.last_gt_cav_labels = self._label_gt_boxes_with_cav_ids(
             data_dict,
             gt_box_tensor)
+        self.last_semantic_context = self._build_default_semantic_context(
+            data_dict)
 
         return pred_box_tensor, pred_score, gt_box_tensor
 
@@ -355,6 +359,15 @@ class LateFusionDataset(basedataset.BaseDataset):
             cav_detections,
             frame_context=frame_context)
         self.last_trust_debug = trust_debug
+        default_semantic_context = self._build_default_semantic_context(
+            data_dict)
+        trust_semantic_context = self._build_semantic_context(
+            cav_detections,
+            trusted_detections,
+            trust_debug)
+        self.last_semantic_context = self._merge_semantic_contexts(
+            default_semantic_context,
+            trust_semantic_context)
         pred_box_tensor, pred_score = merge_and_nms(
             trusted_detections,
             self.post_processor.params['nms_thresh'])
@@ -364,6 +377,76 @@ class LateFusionDataset(basedataset.BaseDataset):
             gt_box_tensor)
 
         return pred_box_tensor, pred_score, gt_box_tensor
+
+    @staticmethod
+    def _build_semantic_context(cav_detections, output_detections,
+                                trust_debug=None):
+        """
+        Keep visualization-only CAV semantics separate from trust logs.
+
+        The context intentionally stores tensors in memory so renderers can draw
+        filtered CAV boxes without bloating JSONL logs.
+        """
+        trust_debug = trust_debug or {}
+        debug_cavs = trust_debug.get('cavs', {}) or {}
+        kept_ids = {str(det['trust_id']) for det in output_detections}
+        cavs = {}
+
+        for det in cav_detections:
+            trust_id = str(det['trust_id'])
+            debug_cav = dict(debug_cavs.get(trust_id, {}))
+            is_ego = bool(det.get('is_ego', False))
+            kept = trust_id in kept_ids
+            state = 'ego' if is_ego else 'kept' if kept else 'filtered'
+            boxes3d = det.get('boxes3d')
+
+            cav_entry = {
+                'cav_id': str(det.get('cav_id', trust_id)),
+                'original_cav_id': str(det.get('original_cav_id',
+                                               det.get('cav_id', trust_id))),
+                'is_ego': is_ego,
+                'state': state,
+                'num_boxes_before': int(boxes3d.shape[0])
+                if boxes3d is not None else 0,
+                'num_boxes_after': int(boxes3d.shape[0]) if kept and
+                boxes3d is not None else 0,
+                'boxes3d_before': boxes3d.detach().cpu()
+                if isinstance(boxes3d, torch.Tensor) else boxes3d,
+            }
+            cav_entry.update(debug_cav)
+            cav_entry['state'] = state
+            cav_entry['is_ego'] = is_ego
+            cavs[trust_id] = cav_entry
+
+        return {'cavs': cavs}
+
+    @staticmethod
+    def _merge_semantic_contexts(base_context, override_context):
+        """Merge baseline CAV states with trust-derived states."""
+        merged = {
+            'cavs': dict((base_context or {}).get('cavs', {}) or {}),
+        }
+        merged['cavs'].update(
+            dict((override_context or {}).get('cavs', {}) or {}))
+        return merged
+
+    @staticmethod
+    def _build_default_semantic_context(data_dict):
+        """Build keep/ego semantics for non-trust baseline visualization."""
+        cavs = {}
+        for cav_key, cav_content in data_dict.items():
+            original_cav_id = str(cav_content.get('original_cav_id',
+                                                  cav_content.get(
+                                                      'cav_id',
+                                                      cav_key)))
+            is_ego = bool(cav_content.get('is_ego', cav_key == 'ego'))
+            cavs[original_cav_id] = {
+                'cav_id': str(cav_content.get('cav_id', cav_key)),
+                'original_cav_id': original_cav_id,
+                'is_ego': is_ego,
+                'state': 'ego' if is_ego else 'kept',
+            }
+        return {'cavs': cavs}
 
     def _label_gt_boxes_with_cav_ids(self, data_dict, gt_box_tensor):
         """
