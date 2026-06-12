@@ -1,0 +1,4 @@
+Pillow>=9.0
+
+# Optional fallback backend. FFmpeg remains the recommended default encoder.
+opencv-python>=4.5
