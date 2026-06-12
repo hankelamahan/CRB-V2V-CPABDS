@@ -166,7 +166,6 @@ opencood/model_weight/old/
 opencood/model_weight/pointpillar_late_fusion_trust_visual_baseline/
 opencood/model_weight/pointpillar_late_fusion_trust_visual_trust/
 opencood/model_weight/**/*_origin.pth
-opencood/model_weight/**/*.pth
 opencood/model_weight/**/*.pt
 opencood/model_weight/**/*.ckpt
 opencood/model_weight/**/*.zip
