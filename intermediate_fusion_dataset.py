@@ -5,7 +5,7 @@
 """
 Dataset class for intermediate fusion
 """
-import random
+import os
 import math
 import warnings
 from collections import OrderedDict
@@ -25,6 +25,7 @@ from opencood.utils.transformation_utils import x1_to_x2
 
 from opencood.data_utils.datasets.overlap_field_voting import OverlapFieldVotingSystem
 from reputation_client import ReputationClient
+from LSTM_enhance.physics_lstm import PhysicsPredictor
 
 
 
@@ -133,6 +134,22 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
             )
 
         self.current_frame_detections = {}
+
+        # --- physics trajectory LSTM predictor ---
+        physics_params = params.get('physics_lstm', {})
+        self.use_physics_lstm = physics_params.get('enabled', True)
+        self.physics_predictor = None
+        if self.use_physics_lstm:
+            _pmodel = physics_params.get(
+                'model_path',
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'physics_lstm.pth'),
+            )
+            self.physics_predictor = PhysicsPredictor(
+                model_path=_pmodel,
+                seq_len=physics_params.get('seq_len', 10),
+                input_dim=physics_params.get('input_dim', 4),
+                max_position_error=physics_params.get('max_position_error', 10.0),
+            )
         # ========== [新增结束] ==========
 
     def __getitem__(self, idx):
@@ -214,6 +231,18 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
                 selected_cav_base['params']['spatial_correction_matrix'])
             infra.append(1 if int(cav_id) < 0 else 0)
 
+            # --- physics LSTM: per-CAV trajectory anomaly score ---
+            physics_anomaly_score = 0.0
+            if self.use_physics_lstm and self.physics_predictor is not None:
+                pose = selected_cav_base['params']['lidar_pose']
+                speed = selected_cav_base['params'].get('ego_speed', 0.0)
+                yaw_rad = pose[4] * (math.pi / 180.0)
+                vx = speed * math.cos(yaw_rad)
+                vy = speed * math.sin(yaw_rad)
+                self.physics_predictor.update_history(cav_id, [pose[0], pose[1], vx, vy])
+                physics_anomaly_score = self.physics_predictor.compute_anomaly_score(
+                    cav_id, [pose[0], pose[1]])
+
             # ========== [新增] 收集各车的检测结果，用于后续投票融合 ==========
             if self.use_trust_fusion and self.reputation_adapter is not None:
                 # 获取该车的检测框（已在get_item_single_car中转换为ego坐标系）
@@ -235,7 +264,8 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
                     self.current_frame_detections[cav_id] = {
                         'boxes': boxes_2d,
                         'scores': [0.8] * len(cav_boxes),
-                        'labels': [1] * len(cav_boxes)
+                        'labels': [1] * len(cav_boxes),
+                        'physics_anomaly_score': physics_anomaly_score,
                     }
             # ========== [新增结束] ==========
 
@@ -267,6 +297,25 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
             # 执行投票融合
             fused_boxes, fused_scores, fused_labels = self.voting_system.fuse(detections_dict)
         # ========== ==========
+
+        # --- report per-CAV detections + physics anomaly score to RSU ---
+        if self.use_trust_fusion and self.reputation_adapter is not None \
+                and len(cav_id_list) > 0:
+            self.reputation_adapter.report_fused_boxes(
+                fused_boxes=np.zeros((0, 4)),
+                fused_scores=np.zeros((0,)),
+                fused_labels=np.zeros((0,), dtype=int),
+                cav_detections={
+                    vid: {
+                        'boxes':  self.current_frame_detections[vid]['boxes'],
+                        'scores': self.current_frame_detections[vid]['scores'],
+                        'labels': self.current_frame_detections[vid]['labels'],
+                        'phy_score': self.current_frame_detections[vid].get(
+                            'physics_anomaly_score', 0.0),
+                    }
+                    for vid in cav_id_list if vid in self.current_frame_detections
+                },
+            )
 
         # exclude all repetitive objects
         unique_indices = \

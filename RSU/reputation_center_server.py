@@ -4,6 +4,11 @@ from pydantic import BaseModel
 import uvicorn
 from typing import Dict, List
 import json
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from LSTM_enhance.reputation_lstm import ReputationPredictor
 
 app = FastAPI()
 
@@ -22,12 +27,15 @@ def init_db():
 
 init_db()
 
+_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reputation_lstm.pth")
+predictor = ReputationPredictor(model_path=_model_path, seq_len=10, threshold=0.15)
+
 # ---------- 数据模型 ----------
 class ReportItem(BaseModel):
-    vehicle_id: str          # 被报告的车辆ID
-    reporter_id: str         # 上报车辆ID
-    verification_result: bool  # True=通过验证，False=失败
-    phy_score: float = 0.0  # 可选：DIVA物理分数
+    vehicle_id: str
+    reporter_id: str
+    verification_result: bool
+    phy_score: float = 0.0
     traj_score: float = 0.0
     consensus_score: float = 0.0
 
@@ -53,11 +61,20 @@ def update_reputation(vehicle_id: str, is_verified: bool):
         delta = -0.1
         fail_cnt += 1
 
-    new_rep = old_rep + delta
-    new_rep = max(0.0, min(1.0, new_rep))
+    new_rep = max(0.0, min(1.0, old_rep + delta))
 
-    c.execute("REPLACE INTO vehicle_reputation (vehicle_id, reputation, pass_count, fail_count, last_updated) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-              (vehicle_id, new_rep, pass_cnt, fail_cnt))
+    # LSTM 异常检测：先更新历史，再检查当前值是否异常
+    predictor.update_history(vehicle_id, new_rep)
+    is_anomaly, _ = predictor.check_anomaly(vehicle_id, new_rep)
+    if is_anomaly:
+        # 持证作恶惩罚：额外扣减并重新 clamp
+        new_rep = max(0.0, new_rep - 0.05)
+
+    c.execute(
+        "REPLACE INTO vehicle_reputation (vehicle_id, reputation, pass_count, fail_count, last_updated) "
+        "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        (vehicle_id, new_rep, pass_cnt, fail_cnt),
+    )
     conn.commit()
     conn.close()
     return new_rep
@@ -91,6 +108,12 @@ async def get_all_reputations():
     rows = c.fetchall()
     conn.close()
     return {vid: rep for vid, rep in rows}
+
+@app.get("/early_warning/{vehicle_id}")
+async def early_warning(vehicle_id: str):
+    """返回基于LSTM的早期预警分数（0~1），越高表示行为越异常"""
+    score = predictor.get_early_warning_score(vehicle_id)
+    return {"vehicle_id": vehicle_id, "early_warning_score": score}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8888)

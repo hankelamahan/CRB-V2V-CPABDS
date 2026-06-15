@@ -1,26 +1,33 @@
 import numpy as np
 from utils import physical_score, trajectory_score, rsu_score
 
+
 class IntermediateFusionManager:
-    def __init__(self):
-        self.reputation = {}          # 车辆最终信誉值
-        self.vel_history = {}         # 速度历史（用于轨迹分数）
-        self.neighbor_votes = {}      # 邻居投票（用于RSU分数）
-        self.beta = 0.5               # 信誉更新率
-        self.weights = {              # 中间层融合权重
+    def __init__(self, lstm_imm_weight: float = 0.4):
+        self.reputation = {}
+        self.vel_history = {}
+        self.neighbor_votes = {}
+        self.beta = 0.5
+        # Weight for LSTM anomaly score when synthesising physical consistency.
+        # IMM contributes (1 - lstm_imm_weight), LSTM contributes lstm_imm_weight.
+        # Set to 0.0 to run IMM-only (backward-compatible fallback).
+        self.lstm_imm_weight = float(np.clip(lstm_imm_weight, 0.0, 1.0))
+        self.weights = {
             "physical": 0.4,
             "trajectory": 0.3,
-            "rsu": 0.3
+            "rsu": 0.3,
         }
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def get_vel_history(self, vid):
-        """获取车辆速度历史，无则初始化"""
         if vid not in self.vel_history:
             self.vel_history[vid] = []
         return self.vel_history[vid]
 
     def update_vel_history(self, vid, vel):
-        """更新速度历史（保留最近5帧）"""
         history = self.get_vel_history(vid)
         history.append(vel)
         if len(history) > 5:
@@ -28,55 +35,87 @@ class IntermediateFusionManager:
         self.vel_history[vid] = history
 
     def get_neighbor_votes(self, vid):
-        """获取车辆邻居投票，无则初始化"""
         if vid not in self.neighbor_votes:
             self.neighbor_votes[vid] = []
         return self.neighbor_votes[vid]
 
     def update_neighbor_votes(self, vid, vote):
-        """更新邻居投票（保留最近10个）"""
         votes = self.get_neighbor_votes(vid)
         votes.append(vote)
         if len(votes) > 10:
             votes.pop(0)
         self.neighbor_votes[vid] = votes
 
-    def fuse_scores(self, phy_score, traj_score, rsu_score):
-        """中间层融合核心：加权融合多源分数"""
-        fused_score = (
-            self.weights["physical"] * phy_score +
-            self.weights["trajectory"] * traj_score +
-            self.weights["rsu"] * rsu_score
-        )
-        return np.clip(fused_score, 0.0, 1.0)
+    # ------------------------------------------------------------------
+    # Score computation
+    # ------------------------------------------------------------------
 
-    def compute_all_scores(self, residual, vid, vel):
-        """计算所有单源分数，并更新历史"""
-        # 1. 物理分数（IMM残差）
-        phy_score = physical_score(residual)
-        # 2. 轨迹分数（速度平滑度）
+    def _fuse_physical_scores(self, imm_phy_score: float, lstm_anomaly_score: float) -> float:
+        """Combine IMM-based physical score with LSTM anomaly score.
+
+        lstm_anomaly_score is an *anomaly* value (high = bad), so it is
+        converted to a consistency score via (1 - lstm_anomaly_score) before
+        blending.  When lstm_imm_weight == 0 the result degrades to the
+        pure IMM score.
+        """
+        lstm_consistency = 1.0 - float(np.clip(lstm_anomaly_score, 0.0, 1.0))
+        w = self.lstm_imm_weight
+        return float(np.clip((1.0 - w) * imm_phy_score + w * lstm_consistency, 0.0, 1.0))
+
+    def fuse_scores(self, phy_score, traj_score, rsu_score_val):
+        fused = (
+            self.weights["physical"] * phy_score
+            + self.weights["trajectory"] * traj_score
+            + self.weights["rsu"] * rsu_score_val
+        )
+        return float(np.clip(fused, 0.0, 1.0))
+
+    def compute_all_scores(self, residual, vid, vel, lstm_anomaly_score: float = 0.0):
+        """Compute all per-vehicle scores and return them as a dict.
+
+        Parameters
+        ----------
+        residual : float
+            IMM fused residual for this vehicle/step.
+        vid : str
+            Vehicle identifier.
+        vel : array-like
+            Current velocity observation used to update trajectory history.
+        lstm_anomaly_score : float, optional
+            Anomaly score from PhysicsPredictor (0–1, higher = more anomalous).
+            Defaults to 0 so callers that have not wired up the LSTM yet are
+            unaffected.
+        """
+        imm_phy = physical_score(residual)
+        combined_phy = self._fuse_physical_scores(imm_phy, lstm_anomaly_score)
+
         self.update_vel_history(vid, vel)
-        traj_score = trajectory_score(self.get_vel_history(vid))
-        # 3. RSU分数（邻居投票）
-        rsu_score_val = rsu_score(self.get_neighbor_votes(vid))
-        # 中间层融合
-        fused_score = self.fuse_scores(phy_score, traj_score, rsu_score_val)
+        traj = trajectory_score(self.get_vel_history(vid))
+
+        rsu_val = rsu_score(self.get_neighbor_votes(vid))
+
+        fused = self.fuse_scores(combined_phy, traj, rsu_val)
         return {
-            "physical": phy_score,
-            "trajectory": traj_score,
-            "rsu": rsu_score_val,
-            "fused": fused_score
+            "physical": combined_phy,
+            "imm_physical": imm_phy,
+            "lstm_anomaly": lstm_anomaly_score,
+            "trajectory": traj,
+            "rsu": rsu_val,
+            "fused": fused,
         }
 
+    # ------------------------------------------------------------------
+    # Reputation
+    # ------------------------------------------------------------------
+
     def update_reputation(self, vid, fused_score):
-        """更新车辆信誉值"""
         if vid not in self.reputation:
-            self.reputation[vid] = 0.5  # 初始信誉
-        # 信誉更新（带边界裁剪）
-        self.reputation[vid] = self.reputation[vid] + self.beta * (fused_score - self.reputation[vid])
-        self.reputation[vid] = np.clip(self.reputation[vid], 0.0, 1.0)
+            self.reputation[vid] = 0.5
+        self.reputation[vid] = self.reputation[vid] + self.beta * (
+            fused_score - self.reputation[vid]
+        )
+        self.reputation[vid] = float(np.clip(self.reputation[vid], 0.0, 1.0))
         return self.reputation[vid]
 
     def get_vote(self, fused_score):
-        """基于融合分数的投票决策"""
         return -1 if fused_score < 0.6 else 1
