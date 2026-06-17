@@ -124,13 +124,7 @@ python opencood/tools/inference.py \
 
 ---
 
-## 扩展模块
-
-以下模块在原有系统基础上独立扩展，不改变核心框架的接口与行为。
-
----
-
-### 模块 A：DIVA 信誉算法接入
+## DIVA 信誉算法接入
 
 **路径**：`DIVA-main/`
 
@@ -162,7 +156,7 @@ python reputation_algorithm/v2v.py \
 
 ---
 
-### 模块 B：基线算法对比
+## 基线算法对比
 
 **路径**：`1_baseline_comparison/`
 
@@ -189,7 +183,7 @@ python run_baseline_comparison.py
 
 ---
 
-### 模块 C：复杂场景压力测试
+## 复杂场景压力测试
 
 **路径**：`2_complex_scenario_results/`
 
@@ -218,7 +212,7 @@ python run_complex_scenario.py
 
 ---
 
-### 模块 D：Enhanced DRAMBR+
+## Enhanced DRAMBR+
 
 **路径**：`3. enhanced_drambr_plus/`
 
@@ -272,7 +266,7 @@ python baseline_comparison_v3.py    # 与基线的定量对比
 
 ---
 
-### 模块 E：LSTM 异常检测增强
+## LSTM 异常检测增强
 
 **路径**：`LSTM_enhance/`
 
