@@ -34,49 +34,4 @@ feat. Chaokun Zhang, Yi Ji, Xiang Han, Jiaming Wang, YuanJie Ma, Chunpeng Wang, 
 ```bash
 pip install -r requirements.txt
 # opencood 框架需单独从 GitHub 安装： pip install git+https://github.com/DerrickXuNu/OpenCOOD.git
-```
-
-### 运行推理
-
-推理脚本位于 `C4-LateFusionConbine/`，需在该目录下以 `PYTHONPATH=.` 运行。
-
-**Baseline（无信任防御，纯 late fusion）：**
-
-```bash
-cd C4-LateFusionConbine
-PYTHONPATH=. python opencood/tools/inference.py \
-  --model_dir opencood/model_weight/pointpillar_late_fusion \
-  --fusion_method late \
-  --frame_index 0 --num_frames 50 --max_frames 50 \
-  --save_vis_dir <输出目录> \
-  --color_mode constant --headless --num_workers 2
-```
-
-**Trust（信任防御 + 信誉可视化）：**
-
-```bash
-cd C4-LateFusionConbine
-PYTHONPATH=. python opencood/tools/inference.py \
-  --model_dir opencood/model_weight/pointpillar_late_fusion_trust_visual_trust \
-  --fusion_method late \
-  --frame_index 0 --num_frames 50 --max_frames 50 \
-  --save_vis_dir <输出目录> \
-  --color_mode constant --headless --num_workers 2 \
-  --show_reputation_overlay --show_gt_cav_ids
-```
-
-**常用参数说明：**
-
-| 参数 | 说明 |
-|------|------|
-| `--model_dir` | 模型权重与 `config.yaml` 所在目录（数据集路径在该 config 的 `root_dir`/`validate_dir`） |
-| `--fusion_method` | 融合方式，本系统用 `late` |
-| `--frame_index` / `--num_frames` / `--max_frames` | 起始帧 / 处理帧数 / 上限 |
-| `--save_vis_dir` | 渲染图输出目录；**不带此参数则不渲染**，调试信誉时更快 |
-| `--show_reputation_overlay` | 顶部显示每辆车信誉横幅（颜色随信誉值渐变） |
-| `--show_gt_cav_ids` | 标注各 CAV 车辆 id，并使其检测框按信誉着色（绿→黄→红） |
-| `--headless` | 无显示环境下渲染（走 matplotlib 后端） |
-| `--color_mode` | 点云着色模式（`constant` / `intensity`） |
-
-
 
