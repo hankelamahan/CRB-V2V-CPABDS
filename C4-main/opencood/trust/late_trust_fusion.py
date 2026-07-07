@@ -156,11 +156,12 @@ class LateTrustFusion:
         return None
 
     def _update_reputations(self, cav_detections, voting_details,
-                            use_physical=False):
+                        use_physical=False):
         for det in cav_detections:
             trust_id = det['trust_id']
             voting_detail = voting_details.get(trust_id, {})
             is_consistent = voting_detail.get('consistent')
+            
             if use_physical:
                 voting_score = None if is_consistent is None else \
                     float(bool(is_consistent))
@@ -169,17 +170,26 @@ class LateTrustFusion:
                     motion_score=det.get('motion_score'),
                     consensus_motion_score=det.get('consensus_motion_score'))
                 det['evidence_score'] = evidence_score
-                det['reputation'] = \
-                    self.reputation_manager.update_from_evidence(
-                        det['cav_id'],
-                        evidence_score,
-                        det.get('original_cav_id'),
-                        det.get('is_ego', False))
+                
+                # ✅ 修复：如果 evidence_score 为 None，保持信誉不变
+                if evidence_score is None:
+                    det['reputation'] = det.get('reputation_before', det.get('reputation', 1.0))
+                else:
+                    det['reputation'] = \
+                        self.reputation_manager.update_from_evidence(
+                            det['cav_id'],
+                            evidence_score,
+                            det.get('original_cav_id'),
+                            det.get('is_ego', False))
                 continue
 
+            # ✅ 修复：当 is_consistent is None 时，也更新 reputation
             if is_consistent is None:
                 det['evidence_score'] = None
+                # ✅ 新增：保持信誉不变（不更新）
+                det['reputation'] = det.get('reputation_before', det.get('reputation', 1.0))
                 continue
+                
             det['evidence_score'] = float(bool(is_consistent))
             det['reputation'] = self.reputation_manager.update_from_voting(
                 det['cav_id'],
@@ -190,8 +200,18 @@ class LateTrustFusion:
     def _prepare_output_detections(self, cav_detections):
         output = []
         for det in cav_detections:
-            reputation = float(det.get('reputation',
-                                       det.get('reputation_before', 1.0)))
+            # ✅ 修复：明确优先级，并确保有默认值
+            reputation = det.get('reputation')
+            if reputation is None:
+                reputation = det.get('reputation_before')
+            if reputation is None:
+                # 如果都没有，使用当前信誉管理器中的值
+                reputation = self.reputation_manager.get_reputation(
+                    det['cav_id'],
+                    det.get('original_cav_id'),
+                    det.get('is_ego', False))
+            reputation = float(reputation)
+            
             keep = det.get('is_ego', False) or reputation >= self.drop_below
             if not keep:
                 continue
@@ -259,6 +279,19 @@ class LateTrustFusion:
     def _frame_context(self, cav_detections, frame_context):
         if frame_context is not None:
             return dict(frame_context)
+        
+        # ✅ 修复：检查 cav_detections 是否为空
+        if not cav_detections:
+            return {
+                'frame': self.frame_counter,
+                'frame_index': self.frame_counter,
+                'scenario_index': -1,
+                'timestamp': '',
+                'timestamp_index': -1,
+                'num_cavs': 0,
+                'ego_id': 'unknown',
+            }
+        
         first = cav_detections[0]
         ego = next((det for det in cav_detections
                     if det.get('is_ego', False)), first)
