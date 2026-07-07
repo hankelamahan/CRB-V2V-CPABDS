@@ -2,6 +2,7 @@
 """Overlap-field voting for detection-level trust updates."""
 
 import numpy as np
+import sys  # 添加这个导入
 
 
 class OverlapFieldVoter:
@@ -20,20 +21,42 @@ class OverlapFieldVoter:
 
     @staticmethod
     def calculate_iou(box1, box2):
-        x1 = max(float(box1[0]), float(box2[0]))
-        y1 = max(float(box1[1]), float(box2[1]))
-        x2 = min(float(box1[2]), float(box2[2]))
-        y2 = min(float(box1[3]), float(box2[3]))
+        """Calculate IoU between two 2D boxes [x1, y1, x2, y2]."""
+        # 直接计算，假设输入已经是数值类型
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
         inter_area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-        area1 = max(0.0, float(box1[2]) - float(box1[0])) * \
-            max(0.0, float(box1[3]) - float(box1[1]))
-        area2 = max(0.0, float(box2[2]) - float(box2[0])) * \
-            max(0.0, float(box2[3]) - float(box2[1]))
+        # 面积直接计算，不需要max（因为框本身是有效的）
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
         union = area1 + area2 - inter_area
-        return inter_area / union if union > 0 else 0.0
+        
+        return inter_area / union if union > 0.0 else 0.0
 
     def vote_detection_level(self, boxes_list, scores_list, labels_list,
                              reputation_scores=None):
+        # ✅ 新增：输入验证
+        # 检查是否为空
+        if not boxes_list:
+            return self.empty_output()
+        
+        # 检查三个列表长度是否一致
+        if not (len(boxes_list) == len(scores_list) == len(labels_list)):
+            raise ValueError(
+                f"boxes_list, scores_list, labels_list must have same length. "
+                f"Got {len(boxes_list)}, {len(scores_list)}, {len(labels_list)}"
+            )
+        
+        # 检查信誉分长度是否匹配
+        if reputation_scores is not None and len(reputation_scores) != len(boxes_list):
+            raise ValueError(
+                f"reputation_scores length ({len(reputation_scores)}) "
+                f"must match boxes_list length ({len(boxes_list)})"
+            )
+
         flattened = []
         for agent_idx, boxes in enumerate(boxes_list):
             reputation = 1.0 if reputation_scores is None else \
@@ -42,7 +65,7 @@ class OverlapFieldVoter:
                 score = float(scores_list[agent_idx][box_idx])
                 label = int(labels_list[agent_idx][box_idx])
                 weight = score * max(reputation, 0.0)
-                if weight <= self.skip_box_thr:
+                if weight <= self.skip_box_thr + sys.float_info.epsilon:
                     continue
                 flattened.append({
                     'box': np.asarray(box, dtype=np.float32),
@@ -84,7 +107,7 @@ class OverlapFieldVoter:
         fused_scores = []
         fused_labels = []
         for cluster in clusters:
-            if cluster['sum_weight'] <= self.skip_box_thr:
+            if cluster['sum_weight'] <= self.skip_box_thr + sys.float_info.epsilon:
                 continue
             fused_boxes.append(cluster['mean_box'])
             fused_scores.append(cluster['score_sum'] / cluster['sum_weight'])
@@ -187,7 +210,7 @@ class OverlapFieldVotingSystem:
             }
 
         matched = 0
-        consistent = 0
+        label_matched = 0  # 改名，更清晰
         for box_idx, box in enumerate(boxes):
             label = labels[box_idx] if box_idx < len(labels) else None
             best_idx = None
@@ -201,22 +224,28 @@ class OverlapFieldVotingSystem:
                 continue
             matched += 1
             if label == fused_labels[best_idx]:
-                consistent += 1
+                label_matched += 1
 
         unmatched = len(boxes) - matched
-        ratio = float(consistent) / float(matched) if matched > 0 else 0.0 #cause the label always is 1,so the consistent is always equal to matched,so the ratio is always 1.0.
+        # ✅ 修复：用"匹配率" = 匹配数量 / 总检测数
+        match_ratio = float(matched) / float(len(boxes)) if len(boxes) > 0 else 0.0
+        # 额外提供标签匹配率（调试用）
+        label_ratio = float(label_matched) / float(matched) if matched > 0 else 0.0
+
         if matched < self.min_matched_boxes:
             return {
                 'consistent': False,
                 'reason': 'insufficient_matched_boxes',
                 'matched_boxes': matched,
                 'unmatched_boxes': unmatched,
-                'consistency_ratio': ratio,
+                'consistency_ratio': match_ratio,  # ✅ 用匹配率
+                'label_consistency': label_ratio,  # ✅ 新增标签一致性
             }
         return {
-            'consistent': ratio > 0.7,
+            'consistent': match_ratio > 0.7,  # ✅ 用匹配率判断
             'reason': 'matched',
             'matched_boxes': matched,
             'unmatched_boxes': unmatched,
-            'consistency_ratio': ratio,
+            'consistency_ratio': match_ratio,
+            'label_consistency': label_ratio,
         }
